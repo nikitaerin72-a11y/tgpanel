@@ -431,4 +431,70 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
   <a class="tab ${tab === 'logs' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=logs">Логи</a>
   <a class="tab ${tab === 'uploadlog' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=uploadlog">Upload Log</a>
   <div class="spacer"></div>
-  ${tab === 'dumps' ? '<a class="tool" href="/clear?key=' + VIEW_KEY + '" onclick="return confir
+  ${tab === 'dumps' ? '<a class="tool" href="/clear?key=' + VIEW_KEY + '" onclick="return confirm(\'Удалить ВСЕ дампы?\')">Очистить</a>' : ''}
+  ${tab === 'logs' ? '<a class="tool" href="/clearlogs?key=' + VIEW_KEY + '" onclick="return confirm(\'Удалить все логи?\')">Очистить</a>' : ''}
+  ${tab === 'uploadlog' ? '<a class="tool" href="/clearuploadlogs?key=' + VIEW_KEY + '" onclick="return confirm(\'Удалить upload-логи?\')">Очистить</a>' : ''}
+</div>
+
+${tab === 'uploadlog' 
+  ? (uploadLogs.length === 0 
+      ? '<div class="empty"><div class="empty-icon">📤</div><div>Upload-логов пока нет</div></div>' 
+      : '<div class="logs">' + uploadRows + '</div>')
+  : tab === 'logs'
+  ? (logs.length === 0 
+      ? '<div class="empty"><div class="empty-icon">📋</div><div>Логов пока нет</div></div>' 
+      : '<div class="logs">' + logRows + '</div>')
+  : tab === 'control'
+  ? controlHtml
+  : (files.length === 0 
+      ? '<div class="empty"><div class="empty-icon">📭</div><div>Пока пусто</div></div>' 
+      : '<div class="grid">' + dumpCards + '</div>')
+}
+
+</body></html>`;
+
+  res.send(html);
+});
+
+app.get('/delete/:name', (req, res) => {
+  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  const p = path.join(SAVE_DIR, req.params.name);
+  if (fs.existsSync(p)) fs.unlinkSync(p);
+  const metaP = p + '.json';
+  if (fs.existsSync(metaP)) fs.unlinkSync(metaP);
+  res.redirect('/?key=' + VIEW_KEY);
+});
+
+app.get('/clear', (req, res) => {
+  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  const files = fs.readdirSync(SAVE_DIR);
+  for (const f of files) {
+    try { fs.unlinkSync(path.join(SAVE_DIR, f)); } catch (e) {}
+  }
+  res.redirect('/?key=' + VIEW_KEY);
+});
+
+app.get('/clearlogs', (req, res) => {
+  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  writeLogs([]);
+  res.redirect('/?key=' + VIEW_KEY + '&tab=logs');
+});
+
+app.get('/clearuploadlogs', (req, res) => {
+  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  writeUploadLogs([]);
+  res.redirect('/?key=' + VIEW_KEY + '&tab=uploadlog');
+});
+
+app.get('/download/:name', (req, res) => {
+  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  const p = path.join(SAVE_DIR, req.params.name);
+  if (!fs.existsSync(p)) return res.status(404).send('not found');
+  res.download(p);
+});
+
+app.use('/media', express.static(MEDIA_DIR));
+
+app.get('/health', (req, res) => res.send('ok'));
+
+app.listen(PORT, () => console.log('server on ' + PORT));

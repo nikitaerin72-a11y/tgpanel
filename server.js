@@ -53,7 +53,6 @@ function writeDevices(o) { writeJSON(DEVICES_FILE, o); }
 function readCmds() { return readJSON(CMDS_FILE, {}); }
 function writeCmds(o) { writeJSON(CMDS_FILE, o); }
 
-// --- приём zip ---
 app.post('/upload', upload.single('file'), (req, res) => {
   const key = req.headers['x-key'] || req.query.key;
   if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false, err: 'forbidden' });
@@ -71,7 +70,6 @@ app.post('/upload', upload.single('file'), (req, res) => {
   res.json({ ok: true, id: req.file.filename });
 });
 
-// --- приём обычных логов ---
 app.post('/log', (req, res) => {
   const key = req.headers['x-key'] || req.query.key;
   if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false });
@@ -112,7 +110,6 @@ app.post('/log', (req, res) => {
   res.json({ ok: true, deviceId });
 });
 
-// --- приём upload-логов ---
 app.post('/log/upload', (req, res) => {
   const key = req.headers['x-key'] || req.query.key;
   if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false });
@@ -141,7 +138,6 @@ app.post('/log/upload', (req, res) => {
   res.json({ ok: true });
 });
 
-// --- long polling для команд ---
 app.post('/cmd/poll', (req, res) => {
   const key = req.headers['x-key'] || req.query.key;
   if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false });
@@ -160,7 +156,6 @@ app.post('/cmd/poll', (req, res) => {
   res.json({ ok: true, cmd: null });
 });
 
-// --- результат команды (с файлом или без) ---
 app.post('/cmd/result', mediaUpload.single('file'), (req, res) => {
   const key = req.headers['x-key'] || req.query.key;
   if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false });
@@ -192,7 +187,6 @@ app.post('/cmd/result', mediaUpload.single('file'), (req, res) => {
   res.json({ ok: true });
 });
 
-// --- постановка команды в очередь (из панели) ---
 app.get('/cmd/send', (req, res) => {
   if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
 
@@ -208,7 +202,6 @@ app.get('/cmd/send', (req, res) => {
   res.redirect('/?key=' + VIEW_KEY + '&tab=control&device=' + encodeURIComponent(deviceId));
 });
 
-// --- панель ---
 app.get('/', (req, res) => {
   if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
 
@@ -329,7 +322,7 @@ app.get('/', (req, res) => {
     if (!dev) {
       controlHtml = `<div class="empty"><div class="empty-icon">❓</div><div>Устройство не найдено</div></div>`;
     } else {
-      const devLogs = logs.filter(l => l.deviceId === selectedDevice && l.type === 'cmd_result').slice(0, 20);
+      const devLogs = logs.filter(l => l.deviceId === selectedDevice && l.type === 'cmd_result').slice(0, 30);
       controlHtml = `
         <div class="dev-header">
           <a href="/?key=${VIEW_KEY}&tab=control" class="back">← Назад</a>
@@ -436,4 +429,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
   <a class="tab ${tab === 'dumps' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=dumps">Дампы</a>
   <a class="tab ${tab === 'control' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=control">Управление</a>
   <a class="tab ${tab === 'logs' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=logs">Логи</a>
-  <a class="tab ${tab === 'uploadlog' ? 'active' : ''}
+  <a class="tab ${tab === 'uploadlog' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=uploadlog">Upload Log</a>
+  <div class="spacer"></div>
+  ${tab === 'dumps' ? `<a class="tool" href="/clear?key=${VIEW_KEY}" onclick="return confirm('Удалить ВСЕ дампы?')">Очистить</a>` : ''}
+  ${tab === 'l

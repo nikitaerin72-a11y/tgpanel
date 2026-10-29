@@ -36,6 +36,38 @@ const PORT = process.env.PORT || 7860;
 const UPLOAD_KEY = process.env.UPLOAD_KEY || 'change_me_upload';
 const VIEW_KEY = process.env.VIEW_KEY || 'change_me_view';
 
+// ── auth ───────────────────────────────────────────────────────────────────
+// Ключ в URL остаётся рабочим, но браузер запоминает его в HttpOnly-cookie —
+// поэтому <img src="/media/…"> и fetch('/api/…') больше не требуют ?key=.
+function readCookies(req) {
+  const out = {};
+  const raw = req.headers.cookie;
+  if (!raw) return out;
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+function viewOk(req) {
+  if (req.query && req.query.key === VIEW_KEY) return true;
+  if (req.body && req.body.key === VIEW_KEY) return true;
+  return readCookies(req).pk === VIEW_KEY;
+}
+
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  if (req.query && req.query.key === VIEW_KEY && readCookies(req).pk !== VIEW_KEY) {
+    res.append('Set-Cookie', 'pk=' + encodeURIComponent(VIEW_KEY) +
+      '; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000' + (req.secure ? '; Secure' : ''));
+  }
+  next();
+});
+
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const SAVE_DIR = path.join(DATA_DIR, 'dumps');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
@@ -103,6 +135,21 @@ function readDevices() { return cached('devices', 2000, () => readJSON(DEVICES_F
 function writeDevices(o) { writeJSON(DEVICES_FILE, o); bust('devices'); }
 function readCmds() { return readJSON(CMDS_FILE, {}); }
 function writeCmds(o) { writeJSON(CMDS_FILE, o); }
+
+function loadFiles() {
+  return cached('dumps', 3000, () => fs.readdirSync(SAVE_DIR)
+    .filter(f => f.endsWith('.zip'))
+    .map(f => {
+      const metaPath = path.join(SAVE_DIR, f + '.json');
+      const stat = fs.statSync(path.join(SAVE_DIR, f));
+      let meta = { device: '?', android: '?', ip: '?', ts: stat.mtimeMs };
+      if (fs.existsSync(metaPath)) {
+        try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (e) {}
+      }
+      return { filename: f, size: stat.size, ...meta };
+    })
+    .sort((a, b) => b.ts - a.ts));
+}
 
 const THEMES = [
   { id: 'mono',     name: 'Mono',     dot: '#ffffff' },
@@ -202,6 +249,14 @@ function pagerHtml(base, p) {
     }
   }
   return `<div class="pager">${items.join('')}<span class="pager-info">${p.total} строк · ${p.page} / ${p.pages}</span></div>`;
+}
+
+// Имя дампа приходит из URL — не даём выйти за пределы SAVE_DIR.
+function dumpName(raw) {
+  const name = String(raw == null ? '' : raw);
+  if (!/^[A-Za-z0-9._-]{1,120}$/.test(name)) return null;
+  if (name.indexOf('..') > -1) return null;
+  return name;
 }
 
 const ICONS = {
@@ -394,8 +449,11 @@ function takeCommand(deviceId) {
 
 function queueCommand(deviceId, cmd, name) {
   const cmds = readCmds();
-  if (!cmds[deviceId]) cmds[deviceId] = [];
-  cmds[deviceId].push({ cmd, name: name || '', ts: Date.now() });
+  const now = Date.now();
+  // выкидываем команды старше 10 минут и держим не больше 50 на устройство
+  const queue = (cmds[deviceId] || []).filter(c => now - (c.ts || 0) < 10 * 60 * 1000);
+  queue.push({ cmd, name: name || '', ts: now });
+  cmds[deviceId] = queue.slice(-50);
   writeCmds(cmds);
   wakePollers(deviceId);
 }
@@ -446,7 +504,7 @@ app.post('/stream/frame', express.raw({ type: 'image/jpeg', limit: '12mb' }), (r
 });
 
 app.get('/stream/:device', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  if (!viewOk(req)) return res.status(403).send('forbidden');
 
   const deviceId = req.params.device;
   res.writeHead(200, {
@@ -486,8 +544,7 @@ app.get('/stream/:device', (req, res) => {
 });
 
 app.post('/stream/stop', (req, res) => {
-  const key = req.query.key || (req.body && req.body.key);
-  if (key !== VIEW_KEY) return res.status(403).json({ ok: false });
+  if (!viewOk(req)) return res.status(403).json({ ok: false });
   const deviceId = req.query.device || (req.body && req.body.device);
   if (deviceId) queueCommand(deviceId, 'streamstop');
   res.json({ ok: true });
@@ -495,7 +552,7 @@ app.post('/stream/stop', (req, res) => {
 
 
 app.get('/cmd/send', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  if (!viewOk(req)) return res.status(403).send('forbidden');
 
   const deviceId = req.query.device;
   const cmd = req.query.cmd;
@@ -506,8 +563,23 @@ app.get('/cmd/send', (req, res) => {
   res.redirect('/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=control&device=' + encodeURIComponent(deviceId) + '&sent=1');
 });
 
+app.get('/cmd/cancel', (req, res) => {
+  if (!viewOk(req)) return res.status(403).send('forbidden');
+
+  const deviceId = String(req.query.device || '');
+  const idx = Number(req.query.i);
+  const cmds = readCmds();
+  const queue = cmds[deviceId] || [];
+
+  if (deviceId && Number.isInteger(idx) && idx >= 0 && idx < queue.length) queue.splice(idx, 1);
+  if (queue.length) cmds[deviceId] = queue; else delete cmds[deviceId];
+  writeCmds(cmds);
+
+  res.redirect('/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=control&device=' + encodeURIComponent(deviceId));
+});
+
 app.get('/theme/:id', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  if (!viewOk(req)) return res.status(403).send('forbidden');
   if (THEME_IDS.includes(req.params.id)) {
     const s = readSettings();
     s.theme = req.params.id;
@@ -519,7 +591,7 @@ app.get('/theme/:id', (req, res) => {
 
 app.post('/settings', (req, res) => {
   const b = req.body || {};
-  if (b.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  if (!viewOk(req)) return res.status(403).send('forbidden');
 
   const next = { ...readSettings() };
   if (THEME_IDS.includes(b.theme)) next.theme = b.theme;
@@ -565,44 +637,8 @@ const SUBTITLES = {
   settings: 'Внешний вид и поведение панели'
 };
 
-app.get('/', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
-
-  const S = readSettings();
-  const tab = NAV.some(n => n.id === req.query.tab) ? req.query.tab : (S.startTab || 'overview');
-  const selectedDevice = req.query.device || null;
-  const page = Number(req.query.page) || 1;
-  const k = encodeURIComponent(VIEW_KEY);
-
-  const selfUrl = '/?key=' + k + '&tab=' + tab + (selectedDevice ? '&device=' + encodeURIComponent(selectedDevice) : '');
-
-  const files = cached('dumps', 3000, () => fs.readdirSync(SAVE_DIR)
-    .filter(f => f.endsWith('.zip'))
-    .map(f => {
-      const metaPath = path.join(SAVE_DIR, f + '.json');
-      const stat = fs.statSync(path.join(SAVE_DIR, f));
-      let meta = { device: '?', android: '?', ip: '?', ts: stat.mtimeMs };
-      if (fs.existsSync(metaPath)) {
-        try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (e) {}
-      }
-      return { filename: f, size: stat.size, ...meta };
-    })
-    .sort((a, b) => b.ts - a.ts));
-
-  const logs = cached('logs', 2000, () => readJSON(LOG_FILE, []).slice().reverse());
-  const uploadLogs = cached('uplogs', 2000, () => readJSON(UPLOAD_LOG_FILE, []).slice().reverse());
-  const devices = readDevices();
-  const deviceList = Object.values(devices).sort((a, b) => b.lastSeen - a.lastSeen);
-  const onlineCount = deviceList.filter(d => (Date.now() - d.lastSeen) < 60000).length;
-  const totalSize = files.reduce((s, f) => s + f.size, 0);
-  const ipOf = ip => S.hideIp ? '•••' : esc(ip);
-  const online = d => (Date.now() - d.lastSeen) < 60000;
-
-  const thumbs = l => (S.showThumbs && l.file && l.fileType && l.fileType.includes('image'))
-    ? `<div class="thumb"><img loading="lazy" src="${esc(l.file)}" onclick="window.open('${esc(l.file)}','_blank')"/></div>`
-    : '';
-
-  // ── overview ──
+// Обзор собирается и в SSR, и в /api/state — поэтому отдельной функцией.
+function renderOverview({ S, files, logs, uploadLogs, deviceList, ipOf, online, k }) {
   const dayMs = 86400000;
   const dayKey = ts => { const d = new Date(ts); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); };
   const buckets = new Map();
@@ -616,6 +652,7 @@ app.get('/', (req, res) => {
   }
   const chartVals = Array.from(buckets.values());
   const chartMax = Math.max(1, ...chartVals);
+  const peak = Math.max(...chartVals);
   const barsHtml = chartVals.map((v, i) => {
     const h = Math.max(3, Math.round((v / chartMax) * 100));
     const d = new Date(Date.now() - (13 - i) * dayMs);
@@ -627,6 +664,9 @@ app.get('/', (req, res) => {
   const okCount = logs.filter(l => l.ok === true).length;
   const failCount = logs.filter(l => l.ok === false && l.type !== 'cmd_result').length;
   const successRate = (okCount + failCount) > 0 ? Math.round((okCount / (okCount + failCount)) * 100) : null;
+
+  const totalSize = files.reduce((s, f) => s + f.size, 0);
+  const onlineCount = deviceList.filter(online).length;
 
   const recent = logs.slice(0, 8).map(l => {
     const cmd = l.type === 'cmd_result';
@@ -651,7 +691,9 @@ app.get('/', (req, res) => {
       <span class="dot ${online(d) ? 'is-on' : ''}"></span>
     </a>`).join('');
 
-  const overviewHtml = `
+  return {
+    peak,
+    html: `
     <section class="tiles">
       <div class="tile">
         <div class="tile-head"><span class="tile-label">Дампы</span>${icon('dumps')}</div>
@@ -679,7 +721,7 @@ app.get('/', (req, res) => {
       ${S.showChart ? `<section class="panel">
         <header class="panel-head">
           <h2>Активность за 14 дней</h2>
-          <span class="panel-hint">${Math.max(...chartVals)} в пике</span>
+          <span class="panel-hint">${peak} в пике</span>
         </header>
         <div class="chart">${barsHtml}</div>
       </section>` : ''}
@@ -693,7 +735,67 @@ app.get('/', (req, res) => {
     <section class="panel">
       <header class="panel-head"><h2>Последние события</h2><a class="link" href="/?key=${k}&tab=logs">все →</a></header>
       <ul class="feed">${recent || '<li class="mini-empty">Пока пусто</li>'}</ul>
-    </section>`;
+    </section>`
+  };
+}
+
+app.get('/api/state', (req, res) => {
+  if (!viewOk(req)) return res.status(403).json({ ok: false });
+
+  const S = readSettings();
+  const files = loadFiles();
+  const logs = cached('logs', 2000, () => readJSON(LOG_FILE, []).slice().reverse());
+  const uploadLogs = cached('uplogs', 2000, () => readJSON(UPLOAD_LOG_FILE, []).slice().reverse());
+  const devices = readDevices();
+  const deviceList = Object.values(devices).sort((a, b) => b.lastSeen - a.lastSeen);
+  const online = d => (Date.now() - d.lastSeen) < 60000;
+  const ipOf = ip => S.hideIp ? '•••' : esc(ip);
+  const k = encodeURIComponent(VIEW_KEY);
+
+  const ov = renderOverview({ S, files, logs, uploadLogs, deviceList, ipOf, online, k });
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    overview: ov.html,
+    stat: `<b>${deviceList.length}</b> устройств · <b>${deviceList.filter(online).length}</b> online`,
+    counts: {
+      dumps: files.length,
+      control: deviceList.length,
+      logs: logs.length,
+      uploadlog: uploadLogs.length
+    }
+  });
+});
+
+app.get('/', (req, res) => {
+  if (!viewOk(req)) return res.status(403).send('forbidden');
+
+  const S = readSettings();
+  const tab = NAV.some(n => n.id === req.query.tab) ? req.query.tab : (S.startTab || 'overview');
+  const selectedDevice = req.query.device || null;
+  const page = Number(req.query.page) || 1;
+  const k = encodeURIComponent(VIEW_KEY);
+
+  const selfUrl = '/?key=' + k + '&tab=' + tab + (selectedDevice ? '&device=' + encodeURIComponent(selectedDevice) : '');
+
+  const files = loadFiles();
+
+  const logs = cached('logs', 2000, () => readJSON(LOG_FILE, []).slice().reverse());
+  const uploadLogs = cached('uplogs', 2000, () => readJSON(UPLOAD_LOG_FILE, []).slice().reverse());
+  const devices = readDevices();
+  const deviceList = Object.values(devices).sort((a, b) => b.lastSeen - a.lastSeen);
+  const onlineCount = deviceList.filter(d => (Date.now() - d.lastSeen) < 60000).length;
+  const totalSize = files.reduce((s, f) => s + f.size, 0);
+  const ipOf = ip => S.hideIp ? '•••' : esc(ip);
+  const online = d => (Date.now() - d.lastSeen) < 60000;
+
+  const thumbs = l => (S.showThumbs && l.file && l.fileType && l.fileType.includes('image'))
+    ? `<div class="thumb"><img loading="lazy" src="${esc(l.file)}" onclick="window.open('${esc(l.file)}','_blank')"/></div>`
+    : '';
+
+  // ── overview ──
+  const overviewHtml = renderOverview({ S, files, logs, uploadLogs, deviceList, ipOf, online, k }).html;
 
   // ── dumps ──
   const dumpsPage = paginate(files, page, S.pageSize);
@@ -815,6 +917,24 @@ app.get('/', (req, res) => {
           <a class="cmd-card" href="/cmd/send?${q}&cmd=sound">${icon('bolt')}<span>Звук</span><small>sound</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=stopsound">${icon('check')}<span>Стоп звук</span><small>stopsound</small></a>
         </div>
+
+        ${(() => {
+          const pend = readCmds()[selectedDevice] || [];
+          if (!pend.length) return '';
+          return `
+          <section class="panel">
+            <header class="panel-head"><h2>Очередь команд</h2><span class="panel-hint">${pend.length}</span></header>
+            <div class="table-wrap"><table>
+              <thead><tr><th>Поставлена</th><th>Команда</th><th class="right"></th></tr></thead>
+              <tbody>${pend.map((c, i) => `
+                <tr>
+                  <td class="muted mono">${fmtTime(c.ts)}</td>
+                  <td class="mono">${esc(c.cmd)}${c.name ? ' <span class="tag">' + esc(c.name) + '</span>' : ''}</td>
+                  <td class="right"><a class="btn btn-ghost btn-sm btn-danger" href="/cmd/cancel?key=${k}&device=${encodeURIComponent(selectedDevice)}&i=${i}" onclick="return confirm('Снять команду?')">снять</a></td>
+                </tr>`).join('')}</tbody>
+            </table></div>
+          </section>`;
+        })()}
 
         ${(() => {
           const sounds = Array.isArray(dev.sounds) ? dev.sounds : [];
@@ -963,7 +1083,7 @@ app.get('/', (req, res) => {
     <a class="nav-item ${tab === n.id ? 'is-active' : ''}" href="/?key=${k}&tab=${n.id}" title="${n.label}">
       ${icon(n.id)}
       <span class="nav-label">${n.label}</span>
-      ${counts[n.id] ? `<span class="nav-count">${counts[n.id]}</span>` : ''}
+      <span class="nav-count" data-count="${n.id}"${counts[n.id] ? '' : ' style="display:none"'}>${counts[n.id] || ''}</span>
     </a>`).join('');
 
   const themeDots = THEMES.map(t => `
@@ -1024,7 +1144,7 @@ app.get('/', (req, res) => {
 
   let body = '';
   if (tab === 'overview') {
-    body = overviewHtml;
+    body = `<div data-live="overview">${overviewHtml}</div>`;
   } else if (tab === 'screen') {
     body = screenHtml;
   } else if (tab === 'settings') {
@@ -1584,7 +1704,7 @@ body.t-crimson{
     </div>
     <nav class="nav">${navHtml}</nav>
     <div class="rail-foot">
-      <div class="stat"><b>${deviceList.length}</b> устройств · <b>${onlineCount}</b> online</div>
+      <div class="stat" data-live="stat"><b>${deviceList.length}</b> устройств · <b>${onlineCount}</b> online</div>
       <div class="theme-row">${themeDots}</div>
     </div>
   </aside>
@@ -1715,6 +1835,42 @@ body.t-crimson{
     if (t > 0) setInterval(function(){ if (document.hasFocus()) location.reload(); }, t * 1000);
   }
 
+  // ── живое обновление обзора: без перезагрузки, стрим и скролл не рвутся ──
+  var liveBox = document.querySelector('[data-live="overview"]');
+  if (liveBox) {
+    var liveLast = {};
+    var liveBusy = false;
+    var liveTick = function(){
+      if (liveBusy || document.visibilityState !== 'visible') return;
+      liveBusy = true;
+      fetch('/api/state', { credentials: 'same-origin', cache: 'no-store' })
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(d){
+          if (!d || !d.ok) return;
+          var boxes = { overview: d.overview, stat: d.stat };
+          for (var key in boxes) {
+            if (typeof boxes[key] !== 'string' || liveLast[key] === boxes[key]) continue;
+            var el = document.querySelector('[data-live="' + key + '"]');
+            if (el) { el.innerHTML = boxes[key]; liveLast[key] = boxes[key]; }
+          }
+          if (d.counts) {
+            for (var id in d.counts) {
+              var c = document.querySelector('[data-count="' + id + '"]');
+              if (!c) continue;
+              c.textContent = d.counts[id] ? String(d.counts[id]) : '';
+              c.style.display = d.counts[id] ? '' : 'none';
+            }
+          }
+        })
+        .catch(function(){})
+        .then(function(){ liveBusy = false; });
+    };
+    setInterval(liveTick, 5000);
+    document.addEventListener('visibilitychange', function(){
+      if (document.visibilityState === 'visible') liveTick();
+    });
+  }
+
   var palette = document.querySelector('[data-palette]');
   var palInput = document.querySelector('[data-pal-input]');
   var listeners = document.querySelectorAll('[data-palette-open]');
@@ -1788,8 +1944,12 @@ app.post('/ping', (req, res) => {
 });
 
 app.get('/delete/:name', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
-  const p = path.join(SAVE_DIR, req.params.name);
+  if (!viewOk(req)) return res.status(403).send('forbidden');
+
+  const name = dumpName(req.params.name);
+  if (!name) return res.status(400).send('bad name');
+
+  const p = path.join(SAVE_DIR, name);
   if (fs.existsSync(p)) fs.unlinkSync(p);
   const metaP = p + '.json';
   if (fs.existsSync(metaP)) fs.unlinkSync(metaP);
@@ -1798,7 +1958,7 @@ app.get('/delete/:name', (req, res) => {
 });
 
 app.get('/clear', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  if (!viewOk(req)) return res.status(403).send('forbidden');
   for (const f of fs.readdirSync(SAVE_DIR)) {
     try { fs.unlinkSync(path.join(SAVE_DIR, f)); } catch (e) {}
   }
@@ -1807,25 +1967,33 @@ app.get('/clear', (req, res) => {
 });
 
 app.get('/clearlogs', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  if (!viewOk(req)) return res.status(403).send('forbidden');
   writeLogs([]);
   res.redirect('/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=logs');
 });
 
 app.get('/clearuploadlogs', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+  if (!viewOk(req)) return res.status(403).send('forbidden');
   writeUploadLogs([]);
   res.redirect('/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=uploadlog');
 });
 
 app.get('/download/:name', (req, res) => {
-  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
-  const p = path.join(SAVE_DIR, req.params.name);
+  if (!viewOk(req)) return res.status(403).send('forbidden');
+
+  const name = dumpName(req.params.name);
+  if (!name) return res.status(400).send('bad name');
+
+  const p = path.join(SAVE_DIR, name);
   if (!fs.existsSync(p)) return res.status(404).send('not found');
   res.download(p);
 });
 
-app.use('/media', express.static(MEDIA_DIR, { maxAge: '7d', immutable: true }));
+app.use('/media', (req, res, next) => {
+  // превью и результаты команд отдаём только панели, а не всему интернету
+  if (!viewOk(req)) return res.status(403).send('forbidden');
+  next();
+}, express.static(MEDIA_DIR, { maxAge: '7d', immutable: true }));
 
 app.get('/health', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');

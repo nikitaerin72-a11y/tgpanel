@@ -1,0 +1,12 @@
+node_modules/
+npm-debug.log*
+
+# состояние панели
+dumps/
+media/
+logs.json
+upload_logs.json
+devices.json
+commands.json
+panel.json
+*.log

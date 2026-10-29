@@ -31,18 +31,19 @@ app.use((req, res, next) => {
   next();
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 7860;
 
 const UPLOAD_KEY = process.env.UPLOAD_KEY || 'change_me_upload';
 const VIEW_KEY = process.env.VIEW_KEY || 'change_me_view';
 
-const SAVE_DIR = path.join(__dirname, 'dumps');
-const MEDIA_DIR = path.join(__dirname, 'media');
-const LOG_FILE = path.join(__dirname, 'logs.json');
-const UPLOAD_LOG_FILE = path.join(__dirname, 'upload_logs.json');
-const DEVICES_FILE = path.join(__dirname, 'devices.json');
-const CMDS_FILE = path.join(__dirname, 'commands.json');
-const SETTINGS_FILE = path.join(__dirname, 'panel.json');
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const SAVE_DIR = path.join(DATA_DIR, 'dumps');
+const MEDIA_DIR = path.join(DATA_DIR, 'media');
+const LOG_FILE = path.join(DATA_DIR, 'logs.json');
+const UPLOAD_LOG_FILE = path.join(DATA_DIR, 'upload_logs.json');
+const DEVICES_FILE = path.join(DATA_DIR, 'devices.json');
+const CMDS_FILE = path.join(DATA_DIR, 'commands.json');
+const SETTINGS_FILE = path.join(DATA_DIR, 'panel.json');
 
 if (!fs.existsSync(SAVE_DIR)) fs.mkdirSync(SAVE_DIR, { recursive: true });
 if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });

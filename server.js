@@ -381,10 +381,10 @@ function takeCommand(deviceId) {
   return cmd;
 }
 
-function queueCommand(deviceId, cmd) {
+function queueCommand(deviceId, cmd, name) {
   const cmds = readCmds();
   if (!cmds[deviceId]) cmds[deviceId] = [];
-  cmds[deviceId].push({ cmd, ts: Date.now() });
+  cmds[deviceId].push({ cmd, name: name || '', ts: Date.now() });
   writeCmds(cmds);
   wakePollers(deviceId);
 }
@@ -451,10 +451,11 @@ app.get('/stream/:device', (req, res) => {
   set.add(res);
 
   const fresh = latestFrame.get(deviceId);
-  if (fresh && Date.now() - (latestFrame.get(deviceId + ':ts') || 0) < FRAME_STALE_MS) {
+  try { res.flushHeaders(); } catch (e) {}
+  if (fresh && Date.now() - fresh.ts < FRAME_STALE_MS) {
     try {
-      res.write('--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + fresh.length + '\r\n\r\n');
-      res.write(fresh);
+      res.write('--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + fresh.buf.length + '\r\n\r\n');
+      res.write(fresh.buf);
       res.write('\r\n');
     } catch (e) {}
   }
@@ -489,12 +490,7 @@ app.get('/cmd/send', (req, res) => {
   const cmd = req.query.cmd;
   if (!deviceId || !cmd) return res.status(400).send('missing params');
 
-  const cmds = readCmds();
-  if (!cmds[deviceId]) cmds[deviceId] = [];
-  cmds[deviceId].push({ cmd, ts: Date.now() });
-  writeCmds(cmds);
-
-  wakePollers(deviceId);
+  queueCommand(deviceId, cmd, req.query.name || '');
 
   res.redirect('/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=control&device=' + encodeURIComponent(deviceId) + '&sent=1');
 });
@@ -810,6 +806,25 @@ app.get('/', (req, res) => {
           <a class="cmd-card" href="/cmd/send?${q}&cmd=sound">${icon('bolt')}<span>Звук</span><small>sound</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=stopsound">${icon('check')}<span>Стоп звук</span><small>stopsound</small></a>
         </div>
+
+        ${(() => {
+          const sounds = Array.isArray(dev.sounds) ? dev.sounds : [];
+          const opts = sounds.length
+            ? sounds.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')
+            : '<option value="">нет звуков на устройстве</option>';
+          return `
+          <section class="panel sound-panel">
+            <header class="panel-head"><h2>Звук</h2><span class="panel-hint">${sounds.length} файлов</span></header>
+            <form class="sound-form" method="get" action="/cmd/send">
+              <input type="hidden" name="key" value="${esc(VIEW_KEY)}"/>
+              <input type="hidden" name="device" value="${esc(selectedDevice)}"/>
+              <input type="hidden" name="cmd" value="sound"/>
+              <select class="select" name="name">${opts}</select>
+              <button class="btn btn-solid" type="submit">Играть</button>
+              <a class="btn btn-ghost btn-danger" href="/cmd/send?${q}&cmd=stopsound">Стоп</a>
+            </form>
+          </section>`;
+        })()}
 
         <section class="panel">
           <header class="panel-head"><h2>Результаты команд</h2><span class="panel-hint">${devLogs.length}</span></header>
@@ -1388,6 +1403,17 @@ td.right .btn+.btn{margin-left:6px}
 .pal-hint{font-size:11px;color:var(--fg-3)}
 
 .panel-actions{display:flex;align-items:center;gap:8px}
+.sound-panel{margin-bottom:16px}
+.sound-form{display:flex;align-items:center;gap:8px;padding:14px 16px;flex-wrap:wrap}
+.select{
+  appearance:none;height:34px;padding:0 32px 0 12px;border-radius:8px;
+  border:1px solid var(--line-2);background:var(--panel);color:var(--fg);
+  font:600 12.5px/1 inherit;cursor:pointer;min-width:200px;
+  background-image:linear-gradient(45deg,transparent 50%,var(--fg-3) 50%),linear-gradient(135deg,var(--fg-3) 50%,transparent 50%);
+  background-position:calc(100% - 16px) 14px,calc(100% - 11px) 14px;
+  background-size:5px 5px,5px 5px;background-repeat:no-repeat;
+}
+.select:focus{outline:none;border-color:var(--fg-3)}
 .screen-wrap{background:#000;display:flex;align-items:center;justify-content:center;min-height:320px;max-height:calc(100vh - 300px)}
 .screen{display:block;max-width:100%;max-height:calc(100vh - 300px);object-fit:contain;background:#000}
 .screen-hint{margin:12px 2px 0;font-size:11.5px;color:var(--fg-3)}
@@ -1633,6 +1659,7 @@ app.post('/ping', (req, res) => {
     android: data.android || prev.android || '?',
     sdk: data.sdk || prev.sdk || '?',
     clients: data.clients && data.clients.length ? data.clients : (prev.clients || []),
+    sounds: Array.isArray(data.sounds) ? data.sounds : (prev.sounds || []),
     ip,
     lastSeen: Date.now()
   };

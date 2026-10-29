@@ -375,7 +375,7 @@ app.get('/cmd/send', (req, res) => {
   cmds[deviceId].push({ cmd, ts: Date.now() });
   writeCmds(cmds);
 
-  res.redirect('/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=control&device=' + encodeURIComponent(deviceId));
+  res.redirect('/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=control&device=' + encodeURIComponent(deviceId) + '&sent=1');
 });
 
 app.get('/theme/:id', (req, res) => {
@@ -1295,7 +1295,7 @@ body.t-crimson{
   .toolbar{flex-wrap:wrap}
 }
 </style></head>
-<body class="${bodyClass}" style="--fs:${S.fontSize}px"${S.autoRefresh ? ` data-autoref="${S.autoRefresh}"` : ''}>
+<body class="${bodyClass}" style="--fs:${S.fontSize}px"${S.autoRefresh ? ` data-autoref="${S.autoRefresh}"` : ''}${req.query.sent ? ' data-watch="3"' : ''}>
 <div class="shell">
   <aside class="rail">
     <div class="brand">
@@ -1345,6 +1345,19 @@ body.t-crimson{
         rows[i].style.display = rows[i].textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';
       }
     });
+  }
+
+  var watch = document.body.getAttribute('data-watch');
+  if (watch) {
+    var w = parseInt(watch, 10);
+    var wkey = 'watch:' + location.pathname + location.search;
+    var wn = parseInt(sessionStorage.getItem(wkey) || '0', 10);
+    if (w > 0 && wn < 10) {
+      sessionStorage.setItem(wkey, String(wn + 1));
+      setTimeout(function(){ location.reload(); }, w * 1000);
+    } else {
+      sessionStorage.removeItem(wkey);
+    }
   }
 
   var auto = document.body.getAttribute('data-autoref');

@@ -1,0 +1,40 @@
+name: keepalive
+
+# Держит free-инстанс Render тёплым, чтобы не было cold start 30-60 c.
+# Работает без ПК и без сторонних сервисов. Публичный репо = безлимитные минуты Actions.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Warm up /health
+        run: |
+          set -u
+          URL="${{ vars.PANEL_URL || 'https://tgpanel-vqim.onrender.com' }}"
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -m 90 -w '%{http_code}' "$URL/health" || echo 000)
+            echo "attempt $i -> $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 10
+          done
+          echo "health did not return 200"
+          exit 1
+
+      - name: Warm up panel route
+        run: |
+          URL="${{ vars.PANEL_URL || 'https://tgpanel-vqim.onrender.com' }}"
+          # без ключа ответ 403 — это нормально, главное чтобы процесс уже был запущен
+          curl -s -o /dev/null -m 60 -w 'root -> %{http_code} in %{time_total}s\n' "$URL/" || true

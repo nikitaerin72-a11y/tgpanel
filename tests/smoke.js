@@ -1,10 +1,5 @@
 // Смоук-тест панели: гоняет все роуты и проверяет, что ничего не отвалилось.
-//
-//   UPLOAD_KEY=testup VIEW_KEY=testview PORT=7999 node server.js
-//   UPLOAD_KEY=testup VIEW_KEY=testview BASE=http://127.0.0.1:7999 node tests/smoke.js
-//
-// Порт по умолчанию 7860, ключи — testview / testup.
-const BASE = process.env.BASE || 'http://127.0.0.1:7860';
+const BASE = process.env.BASE || 'http://127.0.0.1:7999';
 const VK = process.env.VK || 'testview';
 const UK = process.env.UK || 'testup';
 
@@ -35,7 +30,7 @@ async function json(path, opts) { const r = await req(path, opts); let b = null;
   r = await text('/');
   ok('GET / без ключа = 403', r.status === 403, r.status);
   ok('заголовок Referrer-Policy', r.headers.get('referrer-policy') === 'no-referrer', r.headers.get('referrer-policy'));
-  ok('заголовок X-Frame-Options', r.headers.get('x-frame-options') === 'DENY');
+  ok('нет X-Frame-Options (HF Spaces грузит панель в iframe)', r.headers.get('x-frame-options') === null, r.headers.get('x-frame-options'));
 
   cookie = '';
   r = await text('/?key=' + VK);

@@ -59,7 +59,6 @@ function viewOk(req) {
 
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   if (req.query && req.query.key === VIEW_KEY && readCookies(req).pk !== VIEW_KEY) {
     res.append('Set-Cookie', 'pk=' + encodeURIComponent(VIEW_KEY) +

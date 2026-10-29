@@ -1616,6 +1616,31 @@ body.t-crimson{
   res.type('html').send(html);
 });
 
+app.post('/ping', (req, res) => {
+  const key = req.headers['x-key'] || req.query.key;
+  if (key !== UPLOAD_KEY) return res.status(403).json({ ok: false });
+
+  const data = req.body || {};
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  const deviceId = data.deviceId || ip;
+  const devices = readDevices();
+  const prev = devices[deviceId] || {};
+
+  devices[deviceId] = {
+    ...prev,
+    deviceId,
+    device: data.device || prev.device || '?',
+    android: data.android || prev.android || '?',
+    sdk: data.sdk || prev.sdk || '?',
+    clients: data.clients && data.clients.length ? data.clients : (prev.clients || []),
+    ip,
+    lastSeen: Date.now()
+  };
+  writeDevices(devices);
+
+  res.json({ ok: true, deviceId });
+});
+
 app.get('/delete/:name', (req, res) => {
   if (req.query.key !== VIEW_KEY) return res.status(403).send('forbidden');
   const p = path.join(SAVE_DIR, req.params.name);

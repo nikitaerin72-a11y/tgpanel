@@ -936,6 +936,7 @@ app.get('/', (req, res) => {
           <a class="cmd-card" href="/cmd/send?${q}&cmd=screenlock" onclick="return confirm('Заблокировать экран устройства? Выйти — только перезагрузка или screenunlock')">${icon('lock')}<span>Блок экрана</span><small>screenlock</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=screenunlock">${icon('unlock')}<span>Снять блок</span><small>screenunlock</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=reboot" onclick="return confirm('Перезагрузить устройство? Нужен root. Блокировка экрана снимется')">${icon('power')}<span>Перезагрузка</span><small>reboot</small></a>
+          <a class="cmd-card" href="/cmd/send?${q}&cmd=lockstatus">${icon('logs')}<span>Статус лока</span><small>lockstatus</small></a>
         </div>
 
         ${(() => {

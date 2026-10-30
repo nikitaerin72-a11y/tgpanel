@@ -291,6 +291,8 @@ const ICONS = {
   check: '<path d="m5 12.5 4.5 4.5L19 7"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 5H6a1 1 0 0 0-1 1v9"/>',
   bolt: '<path d="M13 2 4 14h6l-1 8 9-12h-6z"/>',
+  lock: '<rect x="5" y="10" width="14" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  unlock: '<rect x="5" y="10" width="14" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 7-2.6"/>',
   filter: '<path d="M4 5h16l-6 7v6l-4 2v-8z"/>'
 };
 
@@ -930,6 +932,8 @@ app.get('/', (req, res) => {
           <a class="cmd-card" href="/?key=${k}&tab=screen&device=${encodeURIComponent(selectedDevice)}">${icon('control')}<span>Экран</span><small>live view</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=sound">${icon('bolt')}<span>Звук</span><small>sound</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=stopsound">${icon('check')}<span>Стоп звук</span><small>stopsound</small></a>
+          <a class="cmd-card" href="/cmd/send?${q}&cmd=screenlock" onclick="return confirm('Заблокировать экран устройства? Выйти — только перезагрузка или screenunlock')">${icon('lock')}<span>Блок экрана</span><small>screenlock</small></a>
+          <a class="cmd-card" href="/cmd/send?${q}&cmd=screenunlock">${icon('unlock')}<span>Снять блок</span><small>screenunlock</small></a>
         </div>
 
         ${(() => {

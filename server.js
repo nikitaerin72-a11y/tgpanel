@@ -293,6 +293,7 @@ const ICONS = {
   bolt: '<path d="M13 2 4 14h6l-1 8 9-12h-6z"/>',
   lock: '<rect x="5" y="10" width="14" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
   unlock: '<rect x="5" y="10" width="14" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 7-2.6"/>',
+  power: '<path d="M12 3v9"/><path d="M6.2 6.2a8 8 0 1 0 11.6 0"/>',
   filter: '<path d="M4 5h16l-6 7v6l-4 2v-8z"/>'
 };
 
@@ -934,6 +935,7 @@ app.get('/', (req, res) => {
           <a class="cmd-card" href="/cmd/send?${q}&cmd=stopsound">${icon('check')}<span>Стоп звук</span><small>stopsound</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=screenlock" onclick="return confirm('Заблокировать экран устройства? Выйти — только перезагрузка или screenunlock')">${icon('lock')}<span>Блок экрана</span><small>screenlock</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=screenunlock">${icon('unlock')}<span>Снять блок</span><small>screenunlock</small></a>
+          <a class="cmd-card" href="/cmd/send?${q}&cmd=reboot" onclick="return confirm('Перезагрузить устройство? Нужен root. Блокировка экрана снимется')">${icon('power')}<span>Перезагрузка</span><small>reboot</small></a>
         </div>
 
         ${(() => {

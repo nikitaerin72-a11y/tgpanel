@@ -71,6 +71,21 @@ async function json(path, opts) { const r = await req(path, opts); let b = null;
   r = await text('/media/whatever.png');
   ok('/media с cookie = 404 (файла нет)', r.status === 404, r.status);
 
+  // ── /sounds: превью звуков ────────────────────────────────────────────────
+  cookie = '';
+  r = await req('/sounds/arbuz.mp3', { cookie: false });
+  ok('/sounds без ключа = 403', r.status === 403, r.status);
+  cookie = savedCookie;
+
+  r = await req('/sounds/arbuz.mp3');
+  const sndType = r.headers.get('content-type') || '';
+  ok('/sounds с cookie = 200 audio', r.status === 200 && sndType.includes('audio'), r.status + ' ' + sndType);
+  await r.body.cancel();
+
+  r = await req('/sounds/no_such.mp3');
+  ok('/sounds несуществующий = 404', r.status === 404, r.status);
+  await r.body.cancel();
+
   // ── path traversal ────────────────────────────────────────────────────────
   r = await text('/download/' + encodeURIComponent('../package.json') + '?key=' + VK);
   ok('traversal /download = 400', r.status === 400, r.status);
@@ -109,6 +124,8 @@ async function json(path, opts) { const r = await req(path, opts); let b = null;
 
   r = await text('/?key=' + VK + '&tab=control&device=' + dev);
   ok('страница девайса показывает очередь', r.body.includes('Очередь команд'), 'no queue block');
+  ok('панель показывает звуки с сервера', r.body.includes('data-preview="ayyy-scream"'), 'no server sound in list');
+  ok('панель даёт плеер', r.body.includes('id="snd-preview"'), 'no audio player');
 
   r = await json('/cmd/poll', {
     method: 'POST',

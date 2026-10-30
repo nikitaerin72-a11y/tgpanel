@@ -70,6 +70,9 @@ app.use((req, res, next) => {
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const SAVE_DIR = path.join(DATA_DIR, 'dumps');
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
+// звуки лежат рядом с кодом, а не в DATA_DIR: так они переживают рестарт
+// контейнера и раздаются панелью для прослушивания
+const SOUND_DIR = path.join(__dirname, 'sounds');
 const LOG_FILE = path.join(DATA_DIR, 'logs.json');
 const UPLOAD_LOG_FILE = path.join(DATA_DIR, 'upload_logs.json');
 const DEVICES_FILE = path.join(DATA_DIR, 'devices.json');
@@ -88,6 +91,18 @@ const storage = multer.diskStorage({
   filename: (req, file, cb) => cb(null, `dump_${Date.now()}.zip`)
 });
 const upload = multer({ storage, limits: { fileSize: 1024 * 1024 * 1024 } });
+
+/** Имена звуков, которые лежат на сервере (sounds/*.mp3). */
+function soundNames() {
+  try {
+    return fs.readdirSync(SOUND_DIR)
+      .filter(f => f.toLowerCase().endsWith('.mp3'))
+      .map(f => f.slice(0, -4))
+      .sort();
+  } catch (e) {
+    return [];
+  }
+}
 
 const mediaStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, MEDIA_DIR),
@@ -936,21 +951,44 @@ app.get('/', (req, res) => {
         })()}
 
         ${(() => {
-          const sounds = Array.isArray(dev.sounds) ? dev.sounds : [];
-          const opts = sounds.length
-            ? sounds.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')
-            : '<option value="">нет звуков на устройстве</option>';
+          // список = то, что реально лежит на устройстве (приходит в /ping) + то,
+          // что лежит на сервере. Так новые звуки видны сразу после деплоя,
+          // даже если телефон ещё не переподключался.
+          const onDevice = new Set(Array.isArray(dev.sounds) ? dev.sounds : []);
+          const onServer = new Set(soundNames());
+          const all = Array.from(new Set([...onDevice, ...onServer])).sort();
+
+          const opts = all.length
+            ? all.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')
+            : '<option value="">нет звуков</option>';
+
+          const grid = all.map(s => {
+            const here = onDevice.has(s);
+            return `
+              <button type="button" class="sound-item${here ? '' : ' is-away'}" data-preview="${esc(s)}"${onServer.has(s) ? '' : ' data-nofile="1"'} title="${here ? 'на устройстве' : 'нет на устройстве'}">
+                <span class="sound-play">▶</span>
+                <span class="sound-name mono">${esc(s)}</span>
+                ${here ? '' : '<span class="sound-tag">нет на телефоне</span>'}
+              </button>`;
+          }).join('');
+
           return `
           <section class="panel sound-panel">
-            <header class="panel-head"><h2>Звук</h2><span class="panel-hint">${sounds.length} файлов</span></header>
+            <header class="panel-head">
+              <h2>Звук</h2>
+              <span class="panel-hint">${all.length} всего · ${onDevice.size} на устройстве</span>
+            </header>
             <form class="sound-form" method="get" action="/cmd/send">
               <input type="hidden" name="key" value="${esc(VIEW_KEY)}"/>
               <input type="hidden" name="device" value="${esc(selectedDevice)}"/>
               <input type="hidden" name="cmd" value="sound"/>
               <select class="select" name="name">${opts}</select>
               <button class="btn btn-solid" type="submit">Играть</button>
+              <button class="btn btn-ghost" type="button" id="snd-play-sel">▶ Прослушать</button>
               <a class="btn btn-ghost btn-danger" href="/cmd/send?${q}&cmd=stopsound">Стоп</a>
             </form>
+            <div class="sound-grid">${grid || '<div class="mini-empty">Пусто</div>'}</div>
+            <audio id="snd-preview" preload="none"></audio>
           </section>`;
         })()}
 
@@ -1563,6 +1601,19 @@ td.right .btn+.btn{margin-left:6px}
 .panel-actions{display:flex;align-items:center;gap:8px}
 .sound-panel{margin-bottom:16px}
 .sound-form{display:flex;align-items:center;gap:8px;padding:14px 16px;flex-wrap:wrap}
+.sound-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px;padding:0 16px 16px}
+.sound-item{
+  display:flex;align-items:center;gap:8px;text-align:left;cursor:pointer;
+  padding:9px 11px;border-radius:8px;border:1px solid var(--line-2);
+  background:var(--panel);color:var(--fg);font:600 12px/1.2 inherit;min-width:0;
+}
+.sound-item:hover{background:var(--hover);border-color:var(--fg-3)}
+.sound-item.is-away{opacity:.6}
+.sound-item.is-on{background:var(--hover);border-color:var(--fg-3)}
+.sound-play{color:var(--fg-3);font-size:11px;flex:0 0 auto}
+.sound-item.is-on .sound-play{color:var(--fg)}
+.sound-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.sound-tag{font-size:10px;color:var(--fg-3);border:1px solid var(--line-2);border-radius:99px;padding:2px 6px;flex:0 0 auto}
 .select{
   appearance:none;height:34px;padding:0 32px 0 12px;border-radius:8px;
   border:1px solid var(--line-2);background:var(--panel);color:var(--fg);
@@ -1870,6 +1921,50 @@ body.t-crimson{
     });
   }
 
+  // ── прослушивание звуков прямо в панели ──
+  (function(){
+    var snd = document.getElementById('snd-preview');
+
+    function mark(name){
+      var items = document.querySelectorAll('.sound-item');
+      for (var i = 0; i < items.length; i++) {
+        items[i].classList.toggle('is-on', name && items[i].getAttribute('data-preview') === name);
+      }
+    }
+
+    function play(name){
+      if (!name) return;
+      if (!snd) {
+        snd = new Audio();
+        snd.id = 'snd-preview';
+        document.body.appendChild(snd);
+      }
+      snd.src = '/sounds/' + encodeURIComponent(name) + '.mp3';
+      var p = snd.play();
+      if (p && p.catch) p.catch(function(){});
+      mark(name);
+    }
+
+    document.addEventListener('click', function(e){
+      var el = e.target.closest ? e.target.closest('[data-preview]') : null;
+      if (el) {
+        if (el.getAttribute('data-nofile')) return;   // файла нет на сервере
+        play(el.getAttribute('data-preview'));
+        return;
+      }
+      var btn = e.target.closest ? e.target.closest('#snd-play-sel') : null;
+      if (btn) {
+        var sel = document.querySelector('.sound-form select[name="name"]');
+        if (sel) play(sel.value);
+      }
+    });
+
+    if (snd) {
+      snd.addEventListener('ended', function(){ mark(null); });
+      snd.addEventListener('pause', function(){ if (snd.ended) mark(null); });
+    }
+  })();
+
   var palette = document.querySelector('[data-palette]');
   var palInput = document.querySelector('[data-pal-input]');
   var listeners = document.querySelectorAll('[data-palette-open]');
@@ -1987,6 +2082,12 @@ app.get('/download/:name', (req, res) => {
   if (!fs.existsSync(p)) return res.status(404).send('not found');
   res.download(p);
 });
+
+app.use('/sounds', (req, res, next) => {
+  // превью звуков — только панели
+  if (!viewOk(req)) return res.status(403).send('forbidden');
+  next();
+}, express.static(SOUND_DIR, { maxAge: '7d', immutable: true }));
 
 app.use('/media', (req, res, next) => {
   // превью и результаты команд отдаём только панели, а не всему интернету

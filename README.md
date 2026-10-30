@@ -51,9 +51,20 @@ HttpOnly-cookie `pk`, и дальше все ссылки, `<img src="/media/…
 | `POST /cmd/result` | `x-key` | результат команды + файл |
 | `POST /stream/frame` | `x-key` | кадр JPEG для MJPEG-потока |
 | `GET /stream/:device` | `?key=` / cookie | сам поток |
+| `GET /sounds/:name.mp3` | `?key=` / cookie | превью звука в браузере |
 | `GET /cmd/send` | `?key=` / cookie | поставить команду |
 | `GET /cmd/cancel` | `?key=` / cookie | снять команду из очереди |
 | `GET /api/state` | cookie | JSON для живого обновления обзора |
+
+## Звуки
+
+`mp3` лежат в `sounds/` рядом с `server.js` (не в `DATA_DIR`, чтобы пережить рестарт
+контейнера). Панель показывает объединённый список: файлы на сервере + те, что
+прислало устройство в `/ping`. Серверные можно прослушать прямо в панели,
+устройство играет только те, что есть в его `assets/sounds`.
+
+Добавить новый звук: положить `name.mp3` в `sounds/` и в `app/src/main/assets/sounds/`
+(имя файла = имя команды `sound`, только `[A-Za-z0-9_.-]`).
 
 ## Тесты
 

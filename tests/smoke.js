@@ -126,6 +126,39 @@ async function json(path, opts) { const r = await req(path, opts); let b = null;
   ok('страница девайса показывает очередь', r.body.includes('Очередь команд'), 'no queue block');
   ok('панель показывает звуки с сервера', r.body.includes('data-preview="ayyy-scream"'), 'no server sound in list');
   ok('панель даёт плеер', r.body.includes('id="snd-preview"'), 'no audio player');
+  ok('кнопка перезагрузки на месте', r.body.includes('cmd=reboot'), 'no reboot card');
+  ok('кнопка блока экрана на месте', r.body.includes('cmd=screenlock'), 'no lock card');
+  ok('блок «Картинка на экран»', r.body.includes('Картинка на экран'), 'no image panel');
+  ok('кнопка «Убрать с экрана»', r.body.includes('cmd=imagehide'), 'no imagehide');
+
+  // картинка: загрузка с панели + раздача устройству по x-key
+  const png1x1 = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082', 'hex');
+
+  const fdBad = new FormData();
+  fdBad.append('file', new Blob([png1x1], { type: 'image/png' }), 'probe.png');
+  ok('/images/upload без ключа = 403', (await req('/images/upload', { method: 'POST', body: fdBad, cookie: false })).status === 403, 'no auth');
+
+  const fdImg = new FormData();
+  fdImg.append('key', VK);
+  fdImg.append('device', dev);
+  fdImg.append('file', new Blob([png1x1], { type: 'image/png' }), 'probe.png');
+  r = await req('/images/upload', { method: 'POST', body: fdImg });
+  ok('/images/upload с ключом = 302', r.status === 302, r.status);
+
+  const imgPage = await text('/?key=' + VK + '&tab=control&device=' + dev);
+  const imgMatch = imgPage.body.match(/\/media\/([^"]*probe\.png)/);
+  ok('загруженная картинка видна в панели', !!imgMatch, 'not listed');
+
+  if (imgMatch) {
+    const wallName = imgMatch[1];
+    ok('/wall без ключа = 403', (await req('/wall/' + wallName, { cookie: false })).status === 403, 'public');
+    const wall = await req('/wall/' + wallName, { headers: { 'x-key': UK }, cookie: false });
+    ok('/wall по x-key = 200', wall.status === 200, wall.status);
+    ok('/wall отдаёт png', (wall.headers.get('content-type') || '').includes('image/png'), wall.headers.get('content-type'));
+
+    await text('/images/delete/' + encodeURIComponent(wallName) + '?key=' + VK + '&device=' + dev);
+    ok('/wall после удаления = 404', (await req('/wall/' + wallName, { headers: { 'x-key': UK }, cookie: false })).status === 404, 'still there');
+  }
 
   r = await json('/cmd/poll', {
     method: 'POST',

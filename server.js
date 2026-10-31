@@ -2247,7 +2247,10 @@ app.post('/images/upload', mediaUpload.single('file'), (req, res) => {
   const back = '/?key=' + encodeURIComponent(VIEW_KEY) + '&tab=control' +
     (deviceId ? '&device=' + encodeURIComponent(deviceId) : '');
 
-  if (!viewOk(req)) return res.status(403).send('forbidden');
+  if (!viewOk(req)) {
+    if (req.file) { try { fs.unlinkSync(req.file.path); } catch (e) {} }
+    return res.status(403).send('forbidden');
+  }
   if (!req.file || !String(req.file.mimetype || '').startsWith('image/')) {
     if (req.file) { try { fs.unlinkSync(req.file.path); } catch (e) {} }
     return res.status(400).send('нужна картинка (jpg/png/webp)');
